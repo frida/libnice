@@ -45,6 +45,7 @@
 #include "stunmessage.h"
 #include "stunhmac.h"
 
+#include <glib.h>
 #include <string.h>
 #include <assert.h>
 
@@ -170,44 +171,21 @@ void stun_hash_creds (const uint8_t *realm, size_t realm_len,
   const uint8_t *password_trimmed = priv_trim_var (password, &password_len);
   const uint8_t *realm_trimmed = priv_trim_var (realm, &realm_len);
   const uint8_t *colon = (uint8_t *)":";
+  GChecksum *checksum;
+  gsize len;
 
-#ifdef HAVE_OPENSSL
-  EVP_MD_CTX *ctx;
+  checksum = g_checksum_new (G_CHECKSUM_MD5);
 
-#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || \
-    (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
-  ctx = EVP_MD_CTX_create ();
-#else
-  ctx = EVP_MD_CTX_new ();
-#endif /* OPENSSL_VERSION_NUMBER */
+  g_checksum_update (checksum, username_trimmed, username_len);
+  g_checksum_update (checksum, colon, 1);
+  g_checksum_update (checksum, realm_trimmed, realm_len);
+  g_checksum_update (checksum, colon, 1);
+  g_checksum_update (checksum, password_trimmed, password_len);
 
-  EVP_DigestInit_ex (ctx, EVP_md5(), NULL);
-  EVP_DigestUpdate (ctx, username_trimmed, username_len);
-  EVP_DigestUpdate (ctx, colon, 1);
-  EVP_DigestUpdate (ctx, realm_trimmed, realm_len);
-  EVP_DigestUpdate (ctx, colon, 1);
-  EVP_DigestUpdate (ctx, password_trimmed, password_len);
-  EVP_DigestFinal_ex (ctx, md5, NULL);
+  len = 16;
+  g_checksum_get_digest (checksum, md5, &len);
 
-#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || \
-    (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
-  EVP_MD_CTX_destroy (ctx);
-#else
-  EVP_MD_CTX_free (ctx);
-#endif /* OPENSSL_VERSION_NUMBER */
-
-#else
-  gnutls_hash_hd_t handle;
-
-  gnutls_hash_init (&handle, GNUTLS_DIG_MD5);
-  gnutls_hash (handle, username_trimmed, username_len);
-  gnutls_hash (handle, colon, 1);
-  gnutls_hash (handle, realm_trimmed, realm_len);
-  gnutls_hash (handle, colon, 1);
-  gnutls_hash (handle, password_trimmed, password_len);
-
-  gnutls_hash_deinit (handle, md5);
-#endif /* HAVE_OPENSSL */
+  g_checksum_free (checksum);
 }
 
 
