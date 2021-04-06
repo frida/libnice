@@ -49,7 +49,13 @@
 #include <string.h>
 #include <assert.h>
 
-#ifdef HAVE_OPENSSL
+#if defined(_WIN32)
+typedef struct _StunKeyBlob {
+  BLOBHEADER header;
+  DWORD key_size;
+  BYTE key_data[0];
+} StunKeyBlob;
+#elif defined(HAVE_OPENSSL)
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 #else
@@ -65,7 +71,66 @@ void stun_sha1 (const uint8_t *msg, size_t len, size_t msg_len, uint8_t *sha,
 
   assert (len >= 44u);
 
-#ifdef HAVE_OPENSSL
+#if defined(_WIN32)
+{
+  HCRYPTPROV prov;
+  size_t blob_size;
+  StunKeyBlob *blob;
+  BLOBHEADER *header;
+  HCRYPTKEY key_handle;
+  HCRYPTHASH hash;
+  HMAC_INFO info = {0};
+  DWORD sha_digest_len;
+
+#ifdef NDEBUG
+#define TRY(x) x;
+#else
+  BOOL success;
+#define TRY(x)                                  \
+  success = x;                                  \
+  assert (success);
+#endif
+
+  TRY (CryptAcquireContextW (&prov, NULL, NULL, PROV_RSA_FULL,
+        CRYPT_VERIFYCONTEXT));
+
+  blob_size = sizeof (StunKeyBlob) + keylen;
+  blob = g_alloca (blob_size);
+  header = &blob->header;
+  header->bType = PLAINTEXTKEYBLOB;
+  header->bVersion = CUR_BLOB_VERSION;
+  header->reserved = 0;
+  header->aiKeyAlg = CALG_RC2;
+  blob->key_size = keylen;
+  memcpy (blob->key_data, key, keylen);
+  TRY (CryptImportKey (prov, (const BYTE *) blob, blob_size, 0,
+        CRYPT_IPSEC_HMAC_KEY, &key_handle));
+
+  TRY (CryptCreateHash (prov, CALG_HMAC, key_handle, 0, &hash));
+
+  info.HashAlgid = CALG_SHA1;
+  TRY (CryptSetHashParam (hash, HP_HMAC_INFO, (const BYTE *) &info, 0));
+
+  TRY (CryptHashData (hash, msg, 2, 0));
+  TRY (CryptHashData (hash, (const BYTE *) &fakelen, 2, 0));
+  TRY (CryptHashData (hash, msg + 4, len - 28, 0));
+
+  /* RFC 3489 specifies that the message's size should be 64 bytes,
+     and \x00 padding should be done */
+  if (padding && ((len - 24) % 64) > 0) {
+    uint16_t pad_size = 64 - ((len - 24) % 64);
+
+    TRY (CryptHashData (hash, pad_char, pad_size, 0));
+  }
+
+  sha_digest_len = 20;
+  TRY (CryptGetHashParam (hash, HP_HASHVAL, sha, &sha_digest_len, 0));
+
+  TRY (CryptDestroyHash (hash));
+  TRY (CryptDestroyKey (key_handle));
+  TRY (CryptReleaseContext (prov, 0));
+}
+#elif defined(HAVE_OPENSSL)
 {
 #ifdef NDEBUG
 #define TRY(x) x;
