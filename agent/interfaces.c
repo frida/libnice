@@ -69,6 +69,9 @@
 #endif
 
 #include <net/if.h>
+#ifdef HAVE_NET_IF_MEDIA_H
+ #include <net/if_media.h>
+#endif
 #include <arpa/inet.h>
 
 #endif /* G_OS_UNIX */
@@ -374,6 +377,7 @@ nice_interfaces_get_local_ips (gboolean include_loopback)
 {
   GList *ips = NULL;
   struct ifaddrs *ifa, *results;
+  int sockfd = -1;
   GList *loopbacks = NULL;
 #ifdef IGNORED_IFACE_PREFIX
   const gchar **prefix;
@@ -404,6 +408,24 @@ nice_interfaces_get_local_ips (gboolean include_loopback)
     if (ifa->ifa_addr->sa_family != AF_INET &&
         ifa->ifa_addr->sa_family != AF_INET6)
       continue;
+
+#ifdef HAVE_NET_IF_MEDIA_H
+    {
+      struct ifmediareq ifmr;
+
+      if (sockfd == -1)
+        sockfd = socket (AF_INET, SOCK_DGRAM, 0);
+
+      memset (&ifmr, 0, sizeof (ifmr));
+      g_strlcpy (ifmr.ifm_name, ifa->ifa_name, sizeof (ifmr.ifm_name));
+
+      if (ioctl (sockfd, SIOCGIFMEDIA, &ifmr) == 0 &&
+          (ifmr.ifm_status & IFM_AVALID) != 0 &&
+          (ifmr.ifm_status & IFM_ACTIVE) == 0) {
+        continue;
+      }
+    }
+#endif
 
     /* Convert to a string. */
     addr_string = sockaddr_to_string (ifa->ifa_addr);
@@ -446,6 +468,9 @@ nice_interfaces_get_local_ips (gboolean include_loopback)
     else
       ips = add_ip_to_list (ips, addr_string, FALSE);
   }
+
+  if (sockfd != -1)
+    close (sockfd);
 
   freeifaddrs (results);
 
