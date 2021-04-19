@@ -29,6 +29,14 @@ gst_req = '>= 1.0.0'
 
 nice_datadir = join_paths(get_option('prefix'), get_option('datadir'))
 
+ndebug = get_option('b_ndebug')
+if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
+  add_project_arguments('-DG_DISABLE_CAST_CHECKS',
+    '-DG_DISABLE_ASSERT',
+    '-DG_DISABLE_CHECKS',
+    language: 'c')
+endif
+
 cc = meson.get_compiler('c')
 
 syslibs = []
