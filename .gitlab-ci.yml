@@ -1,14 +1,39 @@
+include:
+ - remote: "https://gitlab.freedesktop.org/freedesktop/ci-templates/-/raw/7ea696055e322cc7aa4bcbe5422b56a198c4bdff/templates/ci-fairy.yml"
+
 stages:
+ - verify
  - build
  - test
  - deploy
 
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
 default:
   image: registry.freedesktop.org/libnice/libnice/centos7/meson-build
 
+#
+# Check "allow-edit" checkbox on merge requests with ci-fairy
+#
+check allow-edit:
+  extends: '.fdo.ci-fairy'
+  interruptible: true
+  needs: []
+  stage: 'verify'
+  variables:
+    GIT_STRATEGY: 'none'
+  script:
+    - ci-fairy check-merge-request --require-allow-collaboration
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
 
 build:
   stage: build
+  interruptible: true
   variables:
     PREFIX: "${CI_PROJECT_DIR}/libnice-prefix"
   except:
@@ -24,9 +49,11 @@ build:
     paths:
       - build/
 
-build msys2:
-  image: 'registry.freedesktop.org/gstreamer/gst-ci/amd64/windows:v13-master'
+
+.build windows:
+  image: 'registry.freedesktop.org/gstreamer/gst-ci/amd64/windows:2021-02-24.0-master'
   stage: 'build'
+  interruptible: true
   tags:
     - 'docker'
     - 'windows'
@@ -38,28 +65,37 @@ build msys2:
     ErrorActionPreference: 'Stop'
     WarningPreference: 'Stop'
   before_script:
-    - pip3 install -U meson==0.56.2
-  script:
     # Make sure powershell exists on errors
     # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-6
     - $ErrorActionPreference = "Stop"
+    - pip3 install -U meson==0.56.2
+
+
+build msys2:
+  extends: .build windows
+  before_script:
+    # Make sure powershell exists on errors
+    # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-6
+    - $ErrorActionPreference = "Stop"
+    - pip3 install -U meson==0.56.2
 
     # For some reason docker build hangs if this is included in the image, needs more troubleshooting
     - $env:PATH += ';C:\msys64\usr\bin;C:\msys64\mingw64\bin;C:\msys64\mingw32\bin'
+
     # It seems that the gpg doesn't like the SSL secured version of the keyserver
     - C:\msys64\usr\bin\bash -c "pacman-key --init && pacman-key --populate msys2 && pacman-key --refresh-keys || true"
     - echo "Download newest msys2 keyring"
     - C:\msys64\usr\bin\bash -c "curl -O http://repo.msys2.org/msys/x86_64/msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz && pacman -U --noconfirm msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz"
     - C:\msys64\usr\bin\bash -c "pacman-key --init && pacman-key --populate msys2"
     - C:\msys64\usr\bin\bash -c "pacman-key --refresh-keys || true"
-    - echo "Updating MSYS2"
-    - C:\msys64\usr\bin\bash -c "pacman -Syuu --noconfirm || echo Update failed, ignoring"
-    - echo "Killing all MSYS2 processes"
-    - taskkill /F /FI "MODULES eq msys-2.0.dll"
-    - echo "Completing MSYS2 update"
-    - C:\msys64\usr\bin\bash -c "pacman -Suu --noconfirm"
-    - echo "Installing needed MSYS2 packages"
     - C:\msys64\usr\bin\bash -c "pacman -Sy --noconfirm --needed mingw-w64-x86_64-toolchain ninja"
+
+  script:
+    # Make sure powershell exists on errors
+    # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-6
+    - $ErrorActionPreference = "Stop"
+    # For some reason docker build hangs if this is included in the image, needs more troubleshooting
+    - $env:PATH += ';C:\msys64\usr\bin;C:\msys64\mingw64\bin;C:\msys64\mingw32\bin'
 
     # For some reason, options are separated by newline instead of space, so we
     # have to replace them first.
@@ -80,9 +116,9 @@ build msys2:
     #
     # Gitlab Runner issue: https://gitlab.com/gitlab-org/gitlab-runner/issues/4291
     # Blocked upgrade issue: https://gitlab.freedesktop.org/gstreamer/gst-ci/issues/6#note_192780
-    - C:\msys64\usr\bin\bash -c "meson build $env:MESON_ARGS &&
-        ninja -j 1 -C build &&
-        meson test -C build --print-errorlogs --suite libnice"
+    - C:\msys64\usr\bin\bash -c "meson build $env:MESON_ARGS"
+    - C:\msys64\usr\bin\bash -c "ninja -j 1 -C build"
+    - C:\msys64\usr\bin\bash -c "meson test -C build --print-errorlogs --suite libnice"
   artifacts:
     when: on_failure
     paths:
@@ -90,7 +126,7 @@ build msys2:
       - build/build.ninja
 
 .build msvc:
-  extends: build msys2
+  extends: .build windows
   variables:
     GLIB_VERSION: 2.64.2
   script:
@@ -130,6 +166,7 @@ build msvc x86:
         
 test:
   stage: test
+  interruptible: true
   needs:
     - build
   except:
@@ -155,6 +192,7 @@ test valgrind:
 
 doc-and-install:
   stage: test
+  interruptible: true
   needs:
     - build
   except:

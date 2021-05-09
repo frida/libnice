@@ -409,6 +409,12 @@ nice_interfaces_get_local_ips (gboolean include_loopback)
         ifa->ifa_addr->sa_family != AF_INET6)
       continue;
 
+#ifdef __APPLE__
+    if (g_str_has_prefix (ifa->ifa_name, "awdl") ||
+        g_str_has_prefix (ifa->ifa_name, "llw"))
+      continue;
+#endif
+
 #ifdef HAVE_NET_IF_MEDIA_H
     {
       struct ifmediareq ifmr;
@@ -427,12 +433,6 @@ nice_interfaces_get_local_ips (gboolean include_loopback)
     }
 #endif
 
-#ifdef __APPLE__
-    if (g_str_has_prefix (ifa->ifa_name, "awdl") ||
-        g_str_has_prefix (ifa->ifa_name, "llw"))
-      continue;
-#endif
-
     /* Convert to a string. */
     addr_string = sockaddr_to_string (ifa->ifa_addr);
     if (addr_string == NULL) {
@@ -443,9 +443,8 @@ nice_interfaces_get_local_ips (gboolean include_loopback)
 
 #ifdef __APPLE__
     {
-      gboolean is_unused_utun_device;
-
-      is_unused_utun_device = g_str_has_prefix (ifa->ifa_name, "utun") &&
+      gboolean is_unused_utun_device =
+          g_str_has_prefix (ifa->ifa_name, "utun") &&
           g_str_has_prefix (addr_string, "fe80::");
       if (is_unused_utun_device) {
         g_free (addr_string);

@@ -75,10 +75,6 @@
 #include "pseudotcp.h"
 #include "agent-enum-types.h"
 
-/* Maximum size of a UDP packet’s payload, as the packet’s length field is 16b
- * wide. */
-#define MAX_BUFFER_SIZE ((1 << 16) - 1)  /* 65535 */
-
 #define DEFAULT_STUN_PORT  3478
 #define DEFAULT_UPNP_TIMEOUT 200  /* milliseconds */
 #define DEFAULT_IDLE_TIMEOUT 5000 /* milliseconds */
@@ -1967,12 +1963,12 @@ pseudo_tcp_socket_readable (PseudoTcpSocket *sock, gpointer user_data)
    * no data loss of packets already received and dequeued. */
   if (has_io_callback) {
     do {
-      guint8 buf[MAX_BUFFER_SIZE];
       gssize len;
 
       /* FIXME: Why copy into a temporary buffer here? Why can’t the I/O
        * callbacks be emitted directly from the pseudo-TCP receive buffer? */
-      len = pseudo_tcp_socket_recv (sock, (gchar *) buf, sizeof(buf));
+      len = pseudo_tcp_socket_recv (sock, (gchar *) component->recv_buffer,
+          component->recv_buffer_size);
 
       nice_debug ("%s: I/O callback case: Received %" G_GSSIZE_FORMAT " bytes",
           G_STRFUNC, len);
@@ -2006,7 +2002,7 @@ pseudo_tcp_socket_readable (PseudoTcpSocket *sock, gpointer user_data)
         break;
       }
 
-      nice_component_emit_io_callback (agent, component, buf, len);
+      nice_component_emit_io_callback (agent, component, len);
 
       if (!agent_find_component (agent, stream_id, component_id,
               &stream, &component)) {
@@ -3619,13 +3615,13 @@ nice_agent_remove_stream (
   /* note: remove items with matching stream_ids from both lists */
   conn_check_prune_stream (agent, stream);
   discovery_prune_stream (agent, stream_id);
-  refresh_prune_stream_async (agent, stream,
-      (NiceTimeoutLockedCallback) on_stream_refreshes_pruned);
-
-  agent->pruning_streams = g_slist_prepend (agent->pruning_streams, stream);
 
   /* Remove the stream and signal its removal. */
   agent->streams = g_slist_remove (agent->streams, stream);
+  agent->pruning_streams = g_slist_prepend (agent->pruning_streams, stream);
+
+  refresh_prune_stream_async (agent, stream,
+      (NiceTimeoutLockedCallback) on_stream_refreshes_pruned);
 
   if (!agent->streams)
     priv_remove_keepalive_timer (agent);
@@ -3880,10 +3876,6 @@ static gboolean priv_add_remote_candidate (
   else {
     /* case 2: add a new candidate */
 
-    if (type == NICE_CANDIDATE_TYPE_PEER_REFLEXIVE) {
-      nice_debug("Agent %p : Warning: ignoring externally set peer-reflexive candidate!", agent);
-      return FALSE;
-    }
     candidate = nice_candidate_new (type);
 
     candidate->stream_id = stream_id;
@@ -5604,6 +5596,24 @@ nice_agent_dispose (GObject *object)
   g_slist_free (agent->local_addresses);
   agent->local_addresses = NULL;
 
+  if (agent->refresh_list)
+    g_warning ("Agent %p : We still have alive TURN refreshes. Consider "
+        "using nice_agent_close_async() to prune them before releasing the "
+        "agent.", agent);
+
+  /* We must free refreshes before closing streams because a refresh
+   * callback data may contain a pointer to a stream to be freed, when
+   * previously called in the context of a stream removal, by
+   * refresh_prune_stream_async()
+   */
+  for (i = agent->refresh_list; i;) {
+    GSList *next = i->next;
+    CandidateRefresh *refresh = i->data;
+
+    refresh_free (agent, refresh);
+    i = next;
+  }
+
   while (agent->streams) {
     NiceStream *s = agent->streams->data;
 
@@ -5676,25 +5686,31 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
 
   component = socket_source->component;
 
+  if (g_source_is_destroyed (g_main_current_source ())) {
+    /* Silently return FALSE. */
+    nice_debug ("%s: source %p destroyed", G_STRFUNC, g_main_current_source ());
+    return G_SOURCE_REMOVE;
+  }
+
   agent = g_weak_ref_get (&component->agent_ref);
   if (agent == NULL)
     return G_SOURCE_REMOVE;
 
   agent_lock (agent);
 
-  stream = agent_find_stream (agent, component->stream_id);
-
-  if (stream == NULL) {
-    nice_debug ("%s: stream %d destroyed", G_STRFUNC, component->stream_id);
+  if (g_source_is_destroyed (g_main_current_source ())) {
+    /* Silently return FALSE. */
+    nice_debug ("%s: source %p destroyed", G_STRFUNC, g_main_current_source ());
 
     agent_unlock (agent);
     g_object_unref (agent);
     return G_SOURCE_REMOVE;
   }
 
-  if (g_source_is_destroyed (g_main_current_source ())) {
-    /* Silently return FALSE. */
-    nice_debug ("%s: source %p destroyed", G_STRFUNC, g_main_current_source ());
+  stream = agent_find_stream (agent, component->stream_id);
+
+  if (stream == NULL) {
+    nice_debug ("%s: stream %d destroyed", G_STRFUNC, component->stream_id);
 
     agent_unlock (agent);
     g_object_unref (agent);
@@ -5748,10 +5764,9 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
      * In fact, in the case of a reliable agent with I/O callbacks, zero
      * memcpy()s can be achieved (for in-order packet delivery) by emittin the
      * I/O callback directly from the pseudo-TCP receive buffer. */
-    guint8 local_body_buf[MAX_BUFFER_SIZE];
     GInputVector local_bufs[] = {
       { local_header_buf, sizeof (local_header_buf) },
-      { local_body_buf, sizeof (local_body_buf) },
+      { component->recv_buffer, component->recv_buffer_size },
     };
     NiceInputMessage local_message = {
       local_bufs, G_N_ELEMENTS (local_bufs), NULL, 0
@@ -5798,8 +5813,9 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
     }
   } else if (has_io_callback) {
     while (has_io_callback) {
-      guint8 local_buf[MAX_BUFFER_SIZE];
-      GInputVector local_bufs = { local_buf, sizeof (local_buf) };
+      GInputVector local_bufs = {
+        component->recv_buffer, component->recv_buffer_size
+      };
       NiceInputMessage local_message = { &local_bufs, 1, NULL, 0 };
       RecvStatus retval;
 
@@ -5824,7 +5840,7 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
             " bytes", G_STRFUNC, agent, local_message.length);
 
         if (local_message.length > 0) {
-          nice_component_emit_io_callback (agent, component, local_buf,
+          nice_component_emit_io_callback (agent, component,
               local_message.length);
         }
       }
@@ -6656,10 +6672,12 @@ _generate_stream_sdp (NiceAgent *agent, NiceStream *stream,
 NICEAPI_EXPORT gchar *
 nice_agent_generate_local_sdp (NiceAgent *agent)
 {
-  GString * sdp = g_string_new (NULL);
+  GString *sdp;
   GSList *i;
 
   g_return_val_if_fail (NICE_IS_AGENT (agent), NULL);
+
+  sdp = g_string_new (NULL);
 
   agent_lock (agent);
 
@@ -7110,6 +7128,15 @@ static gboolean
 on_agent_refreshes_pruned (NiceAgent *agent, gpointer user_data)
 {
   GTask *task = user_data;
+
+  if (agent->refresh_list) {
+    GSource *timeout_source = NULL;
+    agent_timeout_add_with_context (agent, &timeout_source,
+        "Async refresh prune", agent->stun_initial_timeout,
+        on_agent_refreshes_pruned, user_data);
+    g_source_unref (timeout_source);
+    return G_SOURCE_REMOVE;
+  }
 
   /* This is called from a timeout cb with agent lock held */
 

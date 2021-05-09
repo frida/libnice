@@ -152,6 +152,7 @@ void refresh_free (NiceAgent *agent, CandidateRefresh *cand)
   nice_debug ("Agent %p : Freeing candidate refresh %p", agent, cand);
 
   agent->refresh_list = g_slist_remove (agent->refresh_list, cand);
+  agent->pruning_refreshes = g_slist_remove (agent->pruning_refreshes, cand);
 
   if (cand->timer_source != NULL) {
     g_source_destroy (cand->timer_source);
@@ -285,11 +286,7 @@ typedef struct {
 static void on_refresh_removed (RefreshPruneAsyncData *data)
 {
   if (data->items_to_free == 0 || --(data->items_to_free) == 0) {
-    GSource *timeout_source = NULL;
-    agent_timeout_add_with_context (data->agent, &timeout_source,
-        "Async refresh prune", 0, data->cb, data->user_data);
-
-    g_source_unref (timeout_source);
+    data->cb (data->agent, data->user_data);
     g_free (data);
   }
 }
@@ -310,6 +307,8 @@ static void refresh_prune_async (NiceAgent *agent, GSList *refreshes,
 
     if (cand->disposing)
       continue;
+
+    agent->pruning_refreshes = g_slist_append (agent->pruning_refreshes, cand);
 
     timeout += agent->timer_ta;
     cand->disposing = TRUE;
@@ -404,6 +403,34 @@ void refresh_prune_candidate_async (NiceAgent *agent,
 
   refresh_prune_async (agent, refreshes, function, candidate);
   g_slist_free (refreshes);
+}
+
+/*
+ * Removes the candidate refreshes related to 'nicesock'.
+ */
+void refresh_prune_socket (NiceAgent *agent, NiceSocket *nicesock)
+{
+  GSList *i;
+
+  for (i = agent->refresh_list; i;) {
+    GSList *next = i->next;
+    CandidateRefresh *refresh = i->data;
+
+    if (refresh->nicesock == nicesock)
+      refresh_free(agent, refresh);
+
+    i = next;
+  }
+
+  for (i = agent->pruning_refreshes; i;) {
+    GSList *next = i->next;
+    CandidateRefresh *refresh = i->data;
+
+    if (refresh->nicesock == nicesock)
+      refresh_free(agent, refresh);
+
+    i = next;
+  }
 }
 
 /*
