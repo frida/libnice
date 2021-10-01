@@ -3364,29 +3364,28 @@ nice_agent_gather_candidates (
 
   /* if no local addresses added, generate them ourselves */
   if (agent->local_addresses == NULL) {
-    GList *addresses = nice_interfaces_get_local_ips (FALSE);
     GList *item;
+    GList *local_ips_without_loopback = nice_interfaces_get_local_ips (FALSE);
 
-    for (item = addresses; item; item = g_list_next (item)) {
+    for (item = local_ips_without_loopback; item; item = g_list_next (item)) {
       const gchar *addr_string = item->data;
       NiceAddress *addr = nice_address_new ();
 
       if (nice_address_set_from_string (addr, addr_string)) {
-        local_addresses = g_slist_append (local_addresses, addr);
+        agent->local_addresses = g_slist_append (agent->local_addresses, addr);
       } else {
         nice_debug ("Error: Failed to parse local address ‘%s’.", addr_string);
         nice_address_free (addr);
       }
     }
+    g_list_free_full (local_ips_without_loopback, (GDestroyNotify) g_free);
+  }
 
-    g_list_free_full (addresses, (GDestroyNotify) g_free);
-  } else {
-    for (i = agent->local_addresses; i; i = i->next) {
-      NiceAddress *addr = i->data;
-      NiceAddress *dupaddr = nice_address_dup (addr);
+  for (i = agent->local_addresses; i; i = i->next) {
+    NiceAddress *addr = i->data;
+    NiceAddress *dupaddr = nice_address_dup (addr);
 
-      local_addresses = g_slist_append (local_addresses, dupaddr);
-    }
+    local_addresses = g_slist_append (local_addresses, dupaddr);
   }
 
   length = g_slist_length (local_addresses);

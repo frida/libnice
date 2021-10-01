@@ -297,11 +297,11 @@ nice_candidate_ice_priority_full (guint type_pref, guint local_pref,
 
 guint32
 nice_candidate_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted);
+    gboolean reliable, gboolean nat_assisted, GSList *local_addresses);
 
 guint32
 nice_candidate_ms_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted);
+    gboolean reliable, gboolean nat_assisted, GSList *local_addresses);
 
 guint64
 nice_candidate_pair_priority (guint32 o_prio, guint32 a_prio);

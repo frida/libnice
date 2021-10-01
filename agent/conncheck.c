@@ -1311,10 +1311,10 @@ static guint32 peer_reflexive_candidate_priority (NiceAgent *agent,
     priority = nice_candidate_msn_priority (candidate_priority);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     priority = nice_candidate_ms_ice_priority (candidate_priority,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_addresses);
   } else {
     priority = nice_candidate_ice_priority (candidate_priority,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_addresses);
   }
   nice_candidate_free (candidate_priority);
 
