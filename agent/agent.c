@@ -3320,12 +3320,15 @@ nice_agent_gather_candidates (
   nice_debug ("Agent %p : In %s mode, starting candidate gathering.", agent,
       agent->full_mode ? "ICE-FULL" : "ICE-LITE");
 
+  if (agent->local_ips == NULL)
+    agent->local_ips = nice_interfaces_get_local_ips (TRUE);
+
   /* if no local addresses added, generate them ourselves */
   if (agent->local_addresses == NULL) {
-    GList *addresses = nice_interfaces_get_local_ips (FALSE);
     GList *item;
+    GList *local_ips_without_loopback = nice_interfaces_get_local_ips (FALSE);
 
-    for (item = addresses; item; item = g_list_next (item)) {
+    for (item = local_ips_without_loopback; item; item = g_list_next (item)) {
       const gchar *addr_string = item->data;
       NiceAddress *addr = nice_address_new ();
 
@@ -3336,8 +3339,7 @@ nice_agent_gather_candidates (
         nice_address_free (addr);
       }
     }
-
-    g_list_free_full (addresses, (GDestroyNotify) g_free);
+    g_list_free_full (local_ips_without_loopback, (GDestroyNotify) g_free);
   } else {
     for (i = agent->local_addresses; i; i = i->next) {
       NiceAddress *addr = i->data;
@@ -3660,22 +3662,44 @@ nice_agent_set_port_range (NiceAgent *agent, guint stream_id, guint component_id
   agent_unlock_and_emit (agent);
 }
 
+static gint _find_nice_address (gconstpointer a, gconstpointer b)
+{
+  const gchar *addr_a_string = a;
+  const NiceAddress *addr_b = b;
+  NiceAddress addr_a;
+
+  nice_address_set_from_string (&addr_a, addr_a_string);
+  return (nice_address_equal_no_port (&addr_a, addr_b) ? 0 : 1);
+}
+
 NICEAPI_EXPORT gboolean
 nice_agent_add_local_address (NiceAgent *agent, NiceAddress *addr)
 {
   NiceAddress *dupaddr;
+  gboolean ret;
 
   g_return_val_if_fail (NICE_IS_AGENT (agent), FALSE);
   g_return_val_if_fail (addr != NULL, FALSE);
 
   agent_lock (agent);
 
-  dupaddr = nice_address_dup (addr);
-  nice_address_set_port (dupaddr, 0);
-  agent->local_addresses = g_slist_append (agent->local_addresses, dupaddr);
+  if (agent->local_ips == NULL)
+    agent->local_ips = nice_interfaces_get_local_ips (TRUE);
+
+  if (g_list_find_custom (agent->local_ips, addr, _find_nice_address)) {
+    dupaddr = nice_address_dup (addr);
+    nice_address_set_port (dupaddr, 0);
+    agent->local_addresses = g_slist_append (agent->local_addresses, dupaddr);
+    ret = TRUE;
+  } else {
+    gchar tmpbuf[INET6_ADDRSTRLEN];
+    nice_address_to_string (addr, tmpbuf);
+    nice_debug ("Agent %p : local address [%s] does not exist", agent, tmpbuf);
+    ret = FALSE;
+  }
 
   agent_unlock_and_emit (agent);
-  return TRUE;
+  return ret;
 }
 
 /* Recompute foundations of all candidate pairs from a given stream
@@ -5770,6 +5794,8 @@ nice_agent_dispose (GObject *object)
 
   g_free (agent->software_attribute);
   agent->software_attribute = NULL;
+
+  g_list_free_full (agent->local_ips, (GDestroyNotify) g_free);
 
   if (agent->main_context != NULL)
     g_main_context_unref (agent->main_context);

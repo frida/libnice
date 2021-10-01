@@ -512,7 +512,8 @@ nice_agent_new_full (GMainContext *ctx,
  * </para>
  *
  * See also: nice_agent_gather_candidates()
- * Returns: %TRUE on success, %FALSE on fatal (memory allocation) errors
+ * Returns: %TRUE on success, %FALSE when the local address doesn't
+ * exists.
  */
 gboolean
 nice_agent_add_local_address (NiceAgent *agent, NiceAddress *addr);

@@ -784,10 +784,10 @@ HostCandidateResult discovery_add_local_host_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_ips);
   } else {
     candidate->priority = nice_candidate_ice_priority (candidate,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_ips);
   }
 
   priv_generate_candidate_credentials (agent, candidate);
@@ -885,10 +885,10 @@ discovery_add_server_reflexive_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, nat_assisted);
+        agent->reliable, nat_assisted, agent->local_ips);
   } else {
     candidate->priority =  nice_candidate_ice_priority (candidate,
-        agent->reliable, nat_assisted);
+        agent->reliable, nat_assisted, agent->local_ips);
   }
 
   priv_generate_candidate_credentials (agent, candidate);
@@ -1005,10 +1005,10 @@ discovery_add_relay_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_ips);
   } else {
     candidate->priority =  nice_candidate_ice_priority (candidate,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_ips);
   }
 
   priv_generate_candidate_credentials (agent, candidate);
@@ -1187,10 +1187,10 @@ NiceCandidate *discovery_learn_remote_peer_reflexive_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_ips);
   } else {
     candidate->priority = nice_candidate_ice_priority (candidate,
-        agent->reliable, FALSE);
+        agent->reliable, FALSE, agent->local_ips);
   }
 
   priv_assign_remote_foundation (agent, candidate);

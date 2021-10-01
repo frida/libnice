@@ -191,6 +191,7 @@ struct _NiceAgent
                                          conncheck */
   gboolean consent_freshness;         /* rfc 7675 consent freshness with
                                          connchecks */
+  GList *local_ips;                   /* List of local ip addresses */
   /* XXX: add pointer to internal data struct for ABI-safe extensions */
 };
 
@@ -296,11 +297,11 @@ nice_candidate_ice_priority_full (guint type_pref, guint local_pref,
 
 guint32
 nice_candidate_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted);
+    gboolean reliable, gboolean nat_assisted, GList *local_ips);
 
 guint32
 nice_candidate_ms_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted);
+    gboolean reliable, gboolean nat_assisted, GList *local_ips);
 
 guint64
 nice_candidate_pair_priority (guint32 o_prio, guint32 a_prio);
