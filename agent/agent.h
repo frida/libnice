@@ -400,6 +400,7 @@ typedef enum
 
 /**
  * NiceAgentOption:
+ * @NICE_AGENT_OPTION_NONE: No enabled options (Since: 0.1.19)
  * @NICE_AGENT_OPTION_REGULAR_NOMINATION: Enables regular nomination, default
  *  is aggrssive mode (see #NiceNominationMode).
  * @NICE_AGENT_OPTION_RELIABLE: Enables reliable mode, possibly using PseudoTCP, *  see nice_agent_new_reliable().
@@ -407,8 +408,7 @@ typedef enum
  * @NICE_AGENT_OPTION_ICE_TRICKLE: Enable ICE trickle mode
  * @NICE_AGENT_OPTION_SUPPORT_RENOMINATION: Enable renomination triggered by NOMINATION STUN attribute
  * proposed here: https://tools.ietf.org/html/draft-thatcher-ice-renomination-00
- * @NICE_AGENT_OPTION_CONSENT_FRESHNESS: Enable RFC 7675 consent freshness support. (Since: 0.1.20)
- * @NICE_AGENT_OPTION_BYTESTREAM_TCP: Use bytestream mode for reliable TCP connections. (Since: 0.1.20)
+ * @NICE_AGENT_OPTION_CONSENT_FRESHNESS: Enable RFC 7675 consent freshness support. (Since: 0.1.19)
  *
  * These are options that can be passed to nice_agent_new_full(). They set
  * various properties on the agent. Not including them sets the property to
@@ -417,13 +417,13 @@ typedef enum
  * Since: 0.1.15
  */
 typedef enum {
+  NICE_AGENT_OPTION_NONE = 0,
   NICE_AGENT_OPTION_REGULAR_NOMINATION = 1 << 0,
   NICE_AGENT_OPTION_RELIABLE = 1 << 1,
   NICE_AGENT_OPTION_LITE_MODE = 1 << 2,
   NICE_AGENT_OPTION_ICE_TRICKLE = 1 << 3,
   NICE_AGENT_OPTION_SUPPORT_RENOMINATION = 1 << 4,
   NICE_AGENT_OPTION_CONSENT_FRESHNESS = 1 << 5,
-  NICE_AGENT_OPTION_BYTESTREAM_TCP = 1 << 6,
 } NiceAgentOption;
 
 /**
@@ -1689,7 +1689,7 @@ nice_agent_peer_candidate_gathering_done (
  * Returns: %FALSE if the stream or component could not be found or consent
  *     freshness is not enabled, %TRUE otherwise
  *
- * Since: 0.1.20
+ * Since: 0.1.19
  */
 gboolean
 nice_agent_consent_lost (

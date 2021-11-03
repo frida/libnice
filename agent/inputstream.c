@@ -343,21 +343,11 @@ nice_input_stream_close (GInputStream *stream, GCancellable *cancellable,
 
   agent_lock (agent);
 
-  /* Shut down the read side of the TCP stream, if it still exists. */
+  /* Shut down the read side of the pseudo-TCP stream, if it still exists. */
   if (agent_find_component (agent, priv->stream_id, priv->component_id,
-          &_stream, &component)) {
-    GSList *i;
-
-    if (!pseudo_tcp_socket_is_closed (component->tcp)) {
-      pseudo_tcp_socket_shutdown (component->tcp, PSEUDO_TCP_SHUTDOWN_RD);
-    }
-
-    for (i = component->socket_sources; i; i = i->next) {
-      SocketSource *source = i->data;
-      NiceSocket *sock = source->socket;
-      if (sock->type == NICE_SOCKET_TYPE_TCP_BSD)
-        g_socket_shutdown (sock->fileno, TRUE, FALSE, NULL);
-    }
+          &_stream, &component) && agent->reliable &&
+      !pseudo_tcp_socket_is_closed (component->tcp)) {
+    pseudo_tcp_socket_shutdown (component->tcp, PSEUDO_TCP_SHUTDOWN_RD);
   }
 
   agent_unlock (agent);

@@ -82,17 +82,9 @@
 #define MAX_TCP_MTU 1400 /* Use 1400 because of VPNs and we assume IEE 802.3 */
 
 
-static void agent_consume_next_rfc4571_chunk (NiceAgent *agent,
-    NiceComponent *component, NiceInputMessage *messages, guint n_messages,
-    NiceInputMessageIter *iter);
 static void
 nice_debug_input_message_composition (const NiceInputMessage *messages,
     guint n_messages);
-static gsize append_buffer_to_input_messages (gboolean bytestream_tcp,
-    NiceInputMessage *messages, guint n_messages, NiceInputMessageIter *iter,
-    const guint8 *buffer, gsize buffer_length);
-static gsize nice_input_message_iter_get_message_capacity (
-    NiceInputMessageIter *iter, NiceInputMessage *messages, guint n_messages);
 static const gchar *_cand_type_to_sdp (NiceCandidateType type);
 
 G_DEFINE_TYPE (NiceAgent, nice_agent, G_TYPE_OBJECT);
@@ -159,7 +151,6 @@ static PseudoTcpWriteResult pseudo_tcp_socket_write_packet (PseudoTcpSocket *soc
     const gchar *buffer, guint32 len, gpointer user_data);
 static void adjust_tcp_clock (NiceAgent *agent, NiceStream *stream, NiceComponent *component);
 
-static void nice_agent_constructed (GObject *object);
 static void nice_agent_dispose (GObject *object);
 static void nice_agent_get_property (GObject *object,
   guint property_id, GValue *value, GParamSpec *pspec);
@@ -361,7 +352,6 @@ nice_agent_class_init (NiceAgentClass *klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
 
-  gobject_class->constructed = nice_agent_constructed;
   gobject_class->get_property = nice_agent_get_property;
   gobject_class->set_property = nice_agent_set_property;
   gobject_class->dispose = nice_agent_dispose;
@@ -737,7 +727,7 @@ nice_agent_class_init (NiceAgentClass *klass)
   /**
    * NiceAgent:bytestream-tcp:
    *
-   * This property defines whether receive/send operations over a TCP socket, in
+   * This property defines whether receive/send over a TCP or pseudo-TCP, in
    * reliable mode, are considered as packetized or as bytestream.
    * In unreliable mode, every send/recv is considered as packetized, and
    * this property is ignored and cannot be set.
@@ -747,11 +737,15 @@ nice_agent_class_init (NiceAgentClass *klass)
    * </para>
    * If the property is %TRUE, the stream is considered in bytestream mode
    * and data can be read with any receive size. If the property is %FALSE, then
-   * the stream is considered packetized and each receive will return one packet
+   * the stream is considred packetized and each receive will return one packet
    * of the same size as what was sent from the peer. If in packetized mode,
    * then doing a receive with a size smaller than the packet, will cause the
    * remaining bytes in the packet to be dropped, breaking the reliability
    * of the stream.
+   * <para>
+   * This property is currently read-only, and will become read/write once
+   * bytestream mode will be supported.
+   * </para>
    *
    * Since: 0.1.8
    */
@@ -759,9 +753,9 @@ nice_agent_class_init (NiceAgentClass *klass)
       g_param_spec_boolean (
         "bytestream-tcp",
         "Bytestream TCP",
-        "Use bytestream mode for reliable TCP connections",
+        "Use bytestream mode for reliable TCP and Pseudo-TCP connections",
         FALSE,
-        G_PARAM_READWRITE));
+        G_PARAM_READABLE));
 
   /**
    * NiceAgent:keepalive-conncheck:
@@ -907,7 +901,7 @@ nice_agent_class_init (NiceAgentClass *klass)
     * Setting this property to %TRUE implies that 'keepalive-conncheck' should
     * be %TRUE as well.
     *
-    * Since: 0.1.20
+    * Since: 0.1.19
     */
    g_object_class_install_property (gobject_class, PROP_CONSENT_FRESHNESS,
       g_param_spec_boolean (
@@ -1289,7 +1283,6 @@ nice_agent_init (NiceAgent *agent)
 
   agent->compatibility = NICE_COMPATIBILITY_RFC5245;
   agent->reliable = FALSE;
-  agent->bytestream_tcp = FALSE;
   agent->use_ice_udp = TRUE;
   agent->use_ice_tcp = TRUE;
 
@@ -1301,41 +1294,18 @@ nice_agent_init (NiceAgent *agent)
   g_mutex_init (&agent->agent_mutex);
 }
 
-static void
-nice_agent_constructed (GObject *object)
-{
-  NiceAgent *agent = NICE_AGENT (object);
-
-  if (agent->reliable && agent->compatibility == NICE_COMPATIBILITY_GOOGLE)
-    agent->bytestream_tcp = TRUE;
-
-  G_OBJECT_CLASS (nice_agent_parent_class)->constructed (object);
-}
-
 
 NICEAPI_EXPORT NiceAgent *
 nice_agent_new (GMainContext *ctx, NiceCompatibility compat)
 {
-  NiceAgent *agent = g_object_new (NICE_TYPE_AGENT,
-      "compatibility", compat,
-      "main-context", ctx,
-      "reliable", FALSE,
-      NULL);
-
-  return agent;
+  return nice_agent_new_full (ctx, compat, NICE_AGENT_OPTION_NONE);
 }
 
 
 NICEAPI_EXPORT NiceAgent *
 nice_agent_new_reliable (GMainContext *ctx, NiceCompatibility compat)
 {
-  NiceAgent *agent = g_object_new (NICE_TYPE_AGENT,
-      "compatibility", compat,
-      "main-context", ctx,
-      "reliable", TRUE,
-      NULL);
-
-  return agent;
+  return nice_agent_new_full (ctx, compat, NICE_AGENT_OPTION_RELIABLE);
 }
 
 
@@ -1348,7 +1318,6 @@ nice_agent_new_full (GMainContext *ctx,
       "compatibility", compat,
       "main-context", ctx,
       "reliable", (flags & NICE_AGENT_OPTION_RELIABLE) ? TRUE : FALSE,
-      "bytestream-tcp", (flags & NICE_AGENT_OPTION_BYTESTREAM_TCP) ? TRUE : FALSE,
       "nomination-mode", (flags & NICE_AGENT_OPTION_REGULAR_NOMINATION) ?
       NICE_NOMINATION_MODE_REGULAR : NICE_NOMINATION_MODE_AGGRESSIVE,
       "full-mode", (flags & NICE_AGENT_OPTION_LITE_MODE) ? FALSE : TRUE,
@@ -1468,7 +1437,14 @@ nice_agent_get_property (
       break;
 
     case PROP_BYTESTREAM_TCP:
-      g_value_set_boolean (value, agent->bytestream_tcp);
+      if (agent->reliable) {
+        if (agent->compatibility == NICE_COMPATIBILITY_GOOGLE)
+          g_value_set_boolean (value, TRUE);
+        else
+          g_value_set_boolean (value, FALSE);
+      } else {
+        g_value_set_boolean (value, FALSE);
+      }
       break;
 
     case PROP_KEEPALIVE_CONNCHECK:
@@ -1693,8 +1669,7 @@ nice_agent_set_property (
       break;
 
     case PROP_BYTESTREAM_TCP:
-      if (agent->reliable && agent->compatibility != NICE_COMPATIBILITY_GOOGLE)
-        agent->bytestream_tcp = g_value_get_boolean (value);
+      /* TODO: support bytestream mode and set property to writable */
       break;
 
     case PROP_KEEPALIVE_CONNCHECK:
@@ -2586,11 +2561,7 @@ void agent_signal_component_state_change (NiceAgent *agent, guint stream_id, gui
   g_assert (/* Can (almost) always transition to FAILED (including
              * DISCONNECTED → FAILED which happens if one component fails
              * before another leaves DISCONNECTED): */
-            TRANSITION (DISCONNECTED, FAILED) ||
-            TRANSITION (GATHERING, FAILED) ||
-            TRANSITION (CONNECTING, FAILED) ||
-            TRANSITION (CONNECTED, FAILED) ||
-            TRANSITION (READY, FAILED) ||
+            (new_state == NICE_COMPONENT_STATE_FAILED) ||
             /* Standard progression towards a ready connection: */
             TRANSITION (DISCONNECTED, GATHERING) ||
             TRANSITION (GATHERING, CONNECTING) ||
@@ -2609,9 +2580,9 @@ void agent_signal_component_state_change (NiceAgent *agent, guint stream_id, gui
             /* If a tcp socket of connected pair is disconnected, in
              * conn_check_prune_socket(): */
             TRANSITION (CONNECTED, CONNECTING) ||
-            /* with ICE restart in nice_stream_restart() */
-            TRANSITION (CONNECTED, GATHERING) ||
-            TRANSITION (READY, GATHERING));
+            /* with ICE restart in nice_stream_restart(),
+             * it can always go back to gathering */
+            (new_state == NICE_COMPONENT_STATE_GATHERING));
 
 #undef TRANSITION
 
@@ -2742,7 +2713,8 @@ priv_add_new_candidate_discovery_turn (NiceAgent *agent,
 
   if (turn->type == NICE_RELAY_TYPE_TURN_UDP) {
     if (agent->use_ice_udp == FALSE || turn_tcp == TRUE) {
-      goto skip;
+      g_slice_free (CandidateDiscovery, cdisco);
+      return;
     }
     if (agent->compatibility == NICE_COMPATIBILITY_GOOGLE) {
       NiceAddress addr = nicesock->addr;
@@ -2778,18 +2750,17 @@ priv_add_new_candidate_discovery_turn (NiceAgent *agent,
     /* Ignore tcp candidates if we disabled ice-tcp */
     if ((agent->use_ice_udp == FALSE && reliable_tcp == FALSE) ||
         (agent->use_ice_tcp == FALSE && reliable_tcp == TRUE)) {
-      goto skip;
+      g_slice_free (CandidateDiscovery, cdisco);
+      return;
     }
 
     if (turn_tcp == FALSE) {
-      goto skip;
+      g_slice_free (CandidateDiscovery, cdisco);
+      return;
     }
 
     cdisco->nicesock = agent_create_tcp_turn_socket (agent, stream,
         component, nicesock, &turn->server, turn->type, reliable_tcp);
-    if (!cdisco->nicesock) {
-      goto skip;
-    }
 
     nice_component_attach_socket (component, cdisco->nicesock);
   }
@@ -2828,11 +2799,6 @@ priv_add_new_candidate_discovery_turn (NiceAgent *agent,
       agent, cdisco);
   agent->discovery_list = g_slist_append (agent->discovery_list, cdisco);
   ++agent->discovery_unsched_items;
-
-  return;
-
-skip:
-  g_slice_free (CandidateDiscovery, cdisco);
 }
 
 NICEAPI_EXPORT guint
@@ -3991,7 +3957,6 @@ nice_agent_set_remote_credentials (
     g_strlcpy (stream->remote_password, pwd, NICE_STREAM_MAX_PWD);
 
     conn_check_remote_credentials_set(agent, stream);
-    conn_check_schedule_next (agent);
 
     ret = TRUE;
     goto done;
@@ -4095,10 +4060,8 @@ _set_remote_candidates_locked (NiceAgent *agent, NiceStream *stream,
     }
   }
 
-  if (added > 0) {
+  if (added > 0)
     conn_check_remote_candidates_set(agent, stream, component);
-    conn_check_schedule_next (agent);
-  }
 
   return added;
 }
@@ -4226,10 +4189,6 @@ agent_recv_message_unlocked (
   NiceSocket *nicesock,
   NiceInputMessage *message)
 {
-  NiceInputMessage *provided_message = message;
-  NiceInputMessage rfc4571_message;
-  GInputVector rfc4571_buf;
-  gboolean swallowed_by_forced_relay = FALSE;
   NiceAddress from;
   RecvStatus retval;
   gint sockret;
@@ -4317,103 +4276,112 @@ agent_recv_message_unlocked (
         /* In the case of a real ICE-TCP connection, we can use the socket as a
          * bytestream and do the read here with caching of data being read
          */
-        guint headroom;
-        gboolean missing_cached_data, have_whole_frame;
+        gssize available = g_socket_get_available_bytes (nicesock->fileno);
 
-        sockret = 0;
+        /* TODO: Support bytestream reads */
         message->length = 0;
+        sockret = 0;
+        if (available <= 0) {
+          sockret = available;
 
-        headroom = nice_component_compute_rfc4571_headroom (component);
-        missing_cached_data = component->rfc4571_frame_size == 0 ||
-            headroom < component->rfc4571_frame_size;
-
-        if (missing_cached_data) {
-          gssize available = g_socket_get_available_bytes (nicesock->fileno);
-
-          if (available <= 0) {
-            sockret = available;
-
-            /* If we don't call check_connect_result on an outbound connection,
-             * then is_connected will always return FALSE. That's why we check
-             * both conditions to make sure g_socket_is_connected returns the
-             * correct result, otherwise we end up closing valid connections
+          /* If we don't call check_connect_result on an outbound connection,
+           * then is_connected will always return FALSE. That's why we check
+           * both conditions to make sure g_socket_is_connected returns the
+           * correct result, otherwise we end up closing valid connections
+           */
+          if (g_socket_check_connect_result (nicesock->fileno, NULL) == FALSE ||
+              g_socket_is_connected (nicesock->fileno) == FALSE) {
+            /* If we receive a readable event on a TCP_BSD socket which is
+             * not connected, it means that it failed to connect, so we must
+             * return an error to make the socket fail/closed
              */
-            if (!g_socket_check_connect_result (nicesock->fileno, NULL) ||
-                !g_socket_is_connected (nicesock->fileno)) {
-              /* If we receive a readable event on a TCP_BSD socket which is
-               * not connected, it means that it failed to connect, so we must
-               * return an error to make the socket fail/closed
-               */
-              sockret = -1;
-            } else {
-              gint flags = G_SOCKET_MSG_PEEK;
-
-              /* If available bytes are 0, but the socket is still considered
-               * connected, then either we're just trying to see if there's more
-               * data available or the peer closed the connection.
-               * The only way to know is to do a read, so we do here a peek and
-               * check the return value, if it's 0, it means the peer has closed
-               * the connection, so we must return an error instead of
-               * WOULD_BLOCK
-               */
-              if (g_socket_receive_message (nicesock->fileno, NULL,
-                      NULL, 0, NULL, NULL, &flags, NULL, NULL) == 0)
-                sockret = -1;
-            }
+            sockret = -1;
           } else {
-            GInputVector local_buf = {
-              component->rfc4571_buffer,
-              component->rfc4571_buffer_size
-            };
-            NiceInputMessage local_message = {
-              &local_buf, 1, &component->rfc4571_remote_addr, 0
-            };
+            gint flags = G_SOCKET_MSG_PEEK;
 
-            if (headroom > 0) {
-              memmove (component->rfc4571_buffer,
-                  component->rfc4571_buffer + component->rfc4571_frame_offset,
-                  headroom);
-              local_buf.buffer = (guint8 *) local_buf.buffer + headroom;
-              local_buf.size -= headroom;
-            }
-
-            component->rfc4571_buffer_offset = headroom;
-            component->rfc4571_frame_offset = 0;
+            /* If available bytes are 0, but the socket is still considered
+             * connected, then either we're just trying to see if there's more
+             * data available or the peer closed the connection.
+             * The only way to know is to do a read, so we do here a peek and
+             * check the return value, if it's 0, it means the peer has closed
+             * the connection, so we must return an error instead of WOULD_BLOCK
+             */
+            if (g_socket_receive_message (nicesock->fileno, NULL,
+                    NULL, 0, NULL, NULL, &flags, NULL, NULL) == 0)
+              sockret = -1;
+          }
+        } else if (agent->rfc4571_expecting_length == 0) {
+          if ((gsize) available >= sizeof(guint16)) {
+            guint16 rfc4571_frame;
+            GInputVector local_buf = { &rfc4571_frame, sizeof(guint16)};
+            NiceInputMessage local_message = { &local_buf, 1, message->from, 0};
 
             sockret = nice_socket_recv_messages (nicesock, &local_message, 1);
-            if (sockret == 1) {
-              component->rfc4571_buffer_offset += local_message.length;
-              headroom += local_message.length;
+            if (sockret == 1 && local_message.length >= sizeof (guint16)) {
+              agent->rfc4571_expecting_length = ntohs (rfc4571_frame);
+              available = g_socket_get_available_bytes (nicesock->fileno);
             }
           }
-
-          if (component->rfc4571_frame_size == 0 &&
-              headroom >= sizeof (guint16)) {
-            component->rfc4571_frame_size = sizeof (guint16) + ntohs (
-                *((guint16 *) (component->rfc4571_buffer +
-                    component->rfc4571_frame_offset)));
-          }
         }
+        if (agent->rfc4571_expecting_length > 0) {
+          GInputVector *local_bufs;
+          NiceInputMessage local_message;
+          gsize off;
+          guint n_bufs = 0;
+          guint i;
 
-        have_whole_frame = component->rfc4571_frame_size != 0 &&
-            headroom >= component->rfc4571_frame_size;
-        if (have_whole_frame) {
-          rfc4571_buf.buffer = component->rfc4571_buffer +
-              component->rfc4571_frame_offset + sizeof (guint16);
-          rfc4571_buf.size = component->rfc4571_frame_size - sizeof (guint16);
+          /* Count the number of buffers. */
+          if (message->n_buffers == -1) {
+            for (i = 0; message->buffers[i].buffer != NULL; i++)
+              n_bufs++;
+          } else {
+            n_bufs = message->n_buffers;
+          }
 
-          rfc4571_message.buffers = &rfc4571_buf;
-          rfc4571_message.n_buffers = 1;
-          rfc4571_message.from = provided_message->from;
-          rfc4571_message.length = rfc4571_buf.size;
+          local_bufs = g_alloca (n_bufs * sizeof (GInputVector));
+          local_message.buffers = local_bufs;
+          local_message.from = message->from;
+          local_message.length = 0;
+          local_message.n_buffers = 0;
 
-          message = &rfc4571_message;
-          *message->from = component->rfc4571_remote_addr;
+          /* Only read up to the expected number of bytes in the frame */
+          off = 0;
+          for (i = 0; i < n_bufs; i++) {
+            if (message->buffers[i].size + off < message->length) {
+              /* Skip already full buffers */
+              off += message->buffers[i].size;
+            } else {
+              gssize diff = 0;
 
-          sockret = 1;
-        } else {
-          if (sockret == 1)
-            sockret = 0;
+              /* If we have a partially full buffer, offset the pointer */
+              if (off < message->length)
+                diff = message->length - off;
+
+              /* Those buffers are filled */
+              local_bufs[local_message.n_buffers].buffer =
+                  ((char *) message->buffers[i].buffer) + diff;
+              local_bufs[local_message.n_buffers].size =
+                  MIN (message->buffers[i].size - diff,
+                       agent->rfc4571_expecting_length - off);
+              off += local_message.buffers[local_message.n_buffers].size;
+              local_message.n_buffers++;
+
+              /* If we have a big enough buffer, let's just stop */
+              if (off == message->length + agent->rfc4571_expecting_length)
+                break;
+            }
+          }
+          sockret = nice_socket_recv_messages (nicesock, &local_message, 1);
+          if (sockret == 1) {
+            message->length += local_message.length;
+            agent->rfc4571_expecting_length -= local_message.length;
+            if (agent->rfc4571_expecting_length != 0) {
+              retval = RECV_WOULD_BLOCK;  /* EWOULDBLOCK */
+              nice_debug_verbose ("%s: Agent %p: TCP message incomplete",
+                G_STRFUNC, agent);
+              goto done;
+            }
+          }
         }
       }
     }
@@ -4436,7 +4404,7 @@ agent_recv_message_unlocked (
     retval = sockret;
   }
 
-  g_assert_cmpint (retval, !=, RECV_OOB);
+  g_assert (retval != RECV_OOB);
   if (message->length == 0) {
     retval = RECV_OOB;
     nice_debug_verbose ("%s: Agent %p: message handled out-of-band", G_STRFUNC,
@@ -4458,7 +4426,6 @@ agent_recv_message_unlocked (
 
   if (agent->force_relay && !is_turn) {
     /* Ignore messages not from TURN if TURN is required */
-    swallowed_by_forced_relay = TRUE;
     retval = RECV_WOULD_BLOCK;  /* EWOULDBLOCK */
     goto done;
   }
@@ -4567,94 +4534,12 @@ agent_recv_message_unlocked (
   }
 
 done:
-  if (message == &rfc4571_message) {
-    if (retval == RECV_SUCCESS) {
-      NiceInputMessageIter iter = { 0, 0, 0 };
-      agent_consume_next_rfc4571_chunk (agent, component, provided_message, 1,
-          &iter);
-    } else {
-      agent_consume_next_rfc4571_chunk (agent, component, NULL, 0, NULL);
-    }
-
-    if (swallowed_by_forced_relay)
-      retval = RECV_OOB;
-  }
-
   /* Clear local modifications. */
   if (message->from == &from) {
     message->from = NULL;
   }
 
   return retval;
-}
-
-static void
-agent_consume_next_rfc4571_chunk (NiceAgent *agent, NiceComponent *component,
-    NiceInputMessage *messages, guint n_messages, NiceInputMessageIter *iter)
-{
-  gboolean fully_consumed;
-
-  if (messages != NULL) {
-    gsize bytes_unconsumed, bytes_copied;
-
-    bytes_unconsumed = component->rfc4571_frame_size - sizeof (guint16) -
-        component->rfc4571_consumed_size;
-
-    bytes_copied = append_buffer_to_input_messages (agent->bytestream_tcp,
-        messages, n_messages, iter, component->rfc4571_buffer +
-            component->rfc4571_frame_offset + component->rfc4571_frame_size -
-            bytes_unconsumed,
-        bytes_unconsumed);
-
-    component->rfc4571_consumed_size += bytes_copied;
-
-    fully_consumed = bytes_copied == bytes_unconsumed || !agent->bytestream_tcp;
-  } else {
-    fully_consumed = TRUE;
-  }
-
-  if (fully_consumed) {
-    guint headroom;
-    gboolean have_whole_next_frame;
-
-    component->rfc4571_frame_offset += component->rfc4571_frame_size;
-    component->rfc4571_frame_size = 0;
-    component->rfc4571_consumed_size = 0;
-
-    headroom = nice_component_compute_rfc4571_headroom (component);
-    if (headroom >= sizeof (guint16)) {
-      component->rfc4571_frame_size = sizeof (guint16) + ntohs (
-          *((guint16 *) (component->rfc4571_buffer +
-              component->rfc4571_frame_offset)));
-      have_whole_next_frame = headroom >= component->rfc4571_frame_size;
-    } else {
-      have_whole_next_frame = FALSE;
-    }
-
-    component->rfc4571_wakeup_needed = have_whole_next_frame;
-  } else {
-    component->rfc4571_wakeup_needed = TRUE;
-  }
-}
-
-static gboolean
-agent_try_consume_next_rfc4571_chunk (NiceAgent *agent,
-    NiceComponent *component, NiceInputMessage *messages, guint n_messages,
-    NiceInputMessageIter *iter)
-{
-  guint headroom;
-
-  if (component->rfc4571_frame_size == 0)
-    return FALSE;
-
-  headroom = nice_component_compute_rfc4571_headroom (component);
-  if (headroom < component->rfc4571_frame_size)
-    return FALSE;
-
-  agent_consume_next_rfc4571_chunk (agent, component, messages, n_messages,
-      iter);
-
-  return TRUE;
 }
 
 /* Print the composition of an array of messages. No-op if debugging is
@@ -4767,48 +4652,6 @@ memcpy_buffer_to_input_message (NiceInputMessage *message,
   return message->length;
 }
 
-static gsize
-append_buffer_to_input_messages (gboolean bytestream_tcp,
-    NiceInputMessage *messages, guint n_messages, NiceInputMessageIter *iter,
-    const guint8 *buffer, gsize buffer_length)
-{
-  NiceInputMessage *message = &messages[iter->message];
-  gsize buffer_offset;
-
-  if (iter->buffer == 0 && iter->offset == 0) {
-    message->length = 0;
-  }
-
-  for (buffer_offset = 0;
-       (message->n_buffers >= 0 && iter->buffer < (guint) message->n_buffers) ||
-       (message->n_buffers < 0 && message->buffers[iter->buffer].buffer != NULL);
-       iter->buffer++) {
-    GInputVector *v = &message->buffers[iter->buffer];
-    gsize len;
-
-    len = MIN (buffer_length - buffer_offset, v->size - iter->offset);
-    memcpy ((guint8 *) v->buffer + iter->offset, buffer + buffer_offset, len);
-
-    message->length += len;
-    iter->offset += len;
-    buffer_offset += len;
-
-    if (buffer_offset == buffer_length)
-      break;
-
-    iter->offset = 0;
-  }
-
-  if (!bytestream_tcp || nice_input_message_iter_get_message_capacity (iter,
-        messages, n_messages) == 0) {
-    iter->offset = 0;
-    iter->buffer = 0;
-    iter->message++;
-  }
-
-  return buffer_offset;
-}
-
 /* Concatenate all the buffers in the given @message into a single, newly
  * allocated, monolithic buffer which is returned. The length of the new buffer
  * is returned in @buffer_length, and should be equal to the length field of
@@ -4916,28 +4759,6 @@ nice_input_message_iter_get_n_valid_messages (NiceInputMessageIter *iter)
     return iter->message + 1;
 }
 
-static gsize
-nice_input_message_iter_get_message_capacity (NiceInputMessageIter *iter,
-    NiceInputMessage *messages, guint n_messages)
-{
-  NiceInputMessage *message = &messages[iter->message];
-  guint i;
-  gsize total;
-
-  if (iter->message == n_messages)
-    return 0;
-
-  total = 0;
-  for (i = iter->buffer;
-       (message->n_buffers >= 0 && i < (guint) message->n_buffers) ||
-       (message->n_buffers < 0 && message->buffers[i].buffer != NULL);
-       i++) {
-    total += message->buffers[i].size;
-  }
-
-  return total - iter->offset;
-}
-
 /**
  * nice_input_message_iter_compare:
  * @a: a #NiceInputMessageIter
@@ -4958,8 +4779,9 @@ nice_input_message_iter_compare (const NiceInputMessageIter *a,
 }
 
 /* Will fill up @messages from the first free byte onwards (as determined using
- * @iter). This may be used in bytestream or packetized mode; in packetized mode
- * it will always increment the message index after each buffer is consumed.
+ * @iter). This may be used in reliable or non-reliable mode; in non-reliable
+ * mode it will always increment the message index after each buffer is
+ * consumed.
  *
  * Updates @iter in place. No errors can occur.
  *
@@ -4968,26 +4790,60 @@ nice_input_message_iter_compare (const NiceInputMessageIter *a,
  *
  * Must be called with the io_mutex held. */
 static gint
-pending_io_messages_recv_messages (NiceComponent *component,
-    gboolean bytestream_tcp, NiceInputMessage *messages, guint n_messages,
-    NiceInputMessageIter *iter)
+pending_io_messages_recv_messages (NiceComponent *component, gboolean reliable,
+    NiceInputMessage *messages, guint n_messages, NiceInputMessageIter *iter)
 {
+  gsize len;
   IOCallbackData *data;
-  gsize bytes_copied;
+  NiceInputMessage *message = &messages[iter->message];
 
-  g_assert_cmpuint (component->io_callback_id, ==, 0);
+  g_assert (component->io_callback_id == 0);
 
   data = g_queue_peek_head (&component->pending_io_messages);
   if (data == NULL)
     goto done;
 
-  bytes_copied = append_buffer_to_input_messages (bytestream_tcp, messages,
-      n_messages, iter, data->buf + data->offset, data->buf_len - data->offset);
-  data->offset += bytes_copied;
+  if (iter->buffer == 0 && iter->offset == 0) {
+    message->length = 0;
+  }
 
-  if (!bytestream_tcp || data->offset == data->buf_len) {
+  for (;
+       (message->n_buffers >= 0 && iter->buffer < (guint) message->n_buffers) ||
+       (message->n_buffers < 0 && message->buffers[iter->buffer].buffer != NULL);
+       iter->buffer++) {
+    GInputVector *buffer = &message->buffers[iter->buffer];
+
+    do {
+      len = MIN (data->buf_len - data->offset, buffer->size - iter->offset);
+      memcpy ((guint8 *) buffer->buffer + iter->offset,
+          data->buf + data->offset, len);
+
+      nice_debug ("%s: Unbuffered %" G_GSIZE_FORMAT " bytes into "
+          "buffer %p (offset %" G_GSIZE_FORMAT ", length %" G_GSIZE_FORMAT
+          ").", G_STRFUNC, len, buffer->buffer, iter->offset, buffer->size);
+
+      message->length += len;
+      iter->offset += len;
+      data->offset += len;
+    } while (iter->offset < buffer->size);
+
+    iter->offset = 0;
+  }
+
+  /* Only if we managed to consume the whole buffer should it be popped off the
+   * queue; otherwise we’ll have another go at it later. */
+  if (data->offset == data->buf_len) {
     g_queue_pop_head (&component->pending_io_messages);
     io_callback_data_free (data);
+
+    /* If we’ve consumed an entire message from pending_io_messages, and
+     * are in non-reliable mode, move on to the next message in
+     * @messages. */
+    if (!reliable) {
+      iter->offset = 0;
+      iter->buffer = 0;
+      iter->message++;
+    }
   }
 
 done:
@@ -5096,7 +4952,7 @@ nice_agent_recv_messages_blocking_or_nonblocking (NiceAgent *agent,
 
   while (!received_enough &&
          !g_queue_is_empty (&component->pending_io_messages)) {
-    pending_io_messages_recv_messages (component, agent->bytestream_tcp,
+    pending_io_messages_recv_messages (component, agent->reliable,
         component->recv_messages, component->n_recv_messages,
         &component->recv_messages_iter);
 
@@ -5111,15 +4967,6 @@ nice_agent_recv_messages_blocking_or_nonblocking (NiceAgent *agent,
   }
 
   g_mutex_unlock (&component->io_mutex);
-
-  if (!received_enough && agent_try_consume_next_rfc4571_chunk (agent,
-          component, component->recv_messages, component->n_recv_messages,
-          &component->recv_messages_iter)) {
-    n_valid_messages = nice_input_message_iter_get_n_valid_messages (
-        &component->recv_messages_iter);
-    nice_component_set_io_callback (component, NULL, NULL, NULL, 0, NULL);
-    goto done;
-  }
 
   /* For a reliable stream, grab any data from the pseudo-TCP input buffer
    * before trying the sockets. */
@@ -5229,7 +5076,7 @@ done:
   if (messages_orig) {
     for (i = 0; i < n_messages; i++) {
       if (messages[i].buffers != messages_orig[i].buffers) {
-        g_assert_cmpint (messages[i].n_buffers, ==, 1);
+        g_assert (messages[i].n_buffers == 1);
 
         memcpy_buffer_to_input_message (&messages_orig[i],
             messages[i].buffers[0].buffer, messages[i].length);
@@ -5510,7 +5357,7 @@ nice_agent_send_messages_nonblocking_internal (
         g_set_error (&child_error, G_IO_ERROR, G_IO_ERROR_FAILED,
             "Error writing data to socket.");
       } else if (n_sent > 0 && allow_partial) {
-        g_assert_cmpuint (n_messages, ==, 1);
+        g_assert (n_messages == 1);
         n_sent = output_message_get_size (messages);
       }
     }
@@ -5531,7 +5378,7 @@ nice_agent_send_messages_nonblocking_internal (
 
 done:
   g_assert ((child_error != NULL) == (n_sent == -1));
-  g_assert_cmpint (n_sent, !=, 0);
+  g_assert (n_sent != 0);
   g_assert (n_sent < 0 ||
       (!allow_partial && (guint) n_sent <= n_messages) ||
       (allow_partial && n_messages == 1 &&
@@ -5851,9 +5698,8 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
     return G_SOURCE_REMOVE;
   }
 
-  /* Remove disconnected sockets when we get a HUP and there's no more data to
-   * be read. */
-  if (condition & G_IO_HUP && !(condition & G_IO_IN)) {
+  /* Remove disconnected sockets when we get a HUP */
+  if (condition & G_IO_HUP) {
     nice_debug ("Agent %p: NiceSocket %p has received HUP", agent,
         socket_source->socket);
     if (component->selected_pair.local &&
@@ -5932,7 +5778,7 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
 
       /* Don’t expect any valid messages to escape pseudo_tcp_socket_readable()
        * when in reliable mode. */
-      g_assert_cmpint (retval, !=, RECV_SUCCESS);
+      g_assert (retval != RECV_SUCCESS);
 
       if (retval == RECV_WOULD_BLOCK) {
         /* EWOULDBLOCK. */
@@ -5944,108 +5790,6 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
         break;
       }
 
-      has_io_callback = nice_component_has_io_callback (component);
-    }
-  } else if (agent->reliable &&
-      nice_socket_is_reliable (socket_source->socket)) {
-    NiceInputMessageIter *iter = &component->recv_messages_iter;
-    gsize total_bytes_received = 0;
-
-    while (has_io_callback ||
-        (component->recv_messages != NULL &&
-            !nice_input_message_iter_is_at_end (iter,
-                component->recv_messages, component->n_recv_messages))) {
-      GInputVector internal_buf = {
-        component->recv_buffer, component->recv_buffer_size
-      };
-      NiceInputMessage internal_message = {
-        &internal_buf, 1, NULL, 0
-      };
-      NiceInputMessage *msg;
-      guint n_bufs, i;
-      GInputVector *bufs;
-      RecvStatus retval = 0;
-
-      msg = has_io_callback
-          ? &internal_message
-          : &component->recv_messages[iter->message];
-
-      if (msg->n_buffers == -1) {
-        n_bufs = 0;
-        for (i = 0; msg->buffers[i].buffer != NULL; i++)
-          n_bufs++;
-      } else {
-        n_bufs = msg->n_buffers;
-      }
-
-      bufs = g_newa (GInputVector, n_bufs);
-      memcpy (bufs, msg->buffers, n_bufs * sizeof (GInputVector));
-
-      msg->length = 0;
-
-      do {
-        NiceInputMessage m = { bufs, n_bufs, msg->from, 0 };
-        gsize off;
-
-        retval = agent_recv_message_unlocked (agent, stream, component,
-            socket_source->socket, &m);
-        if (retval == RECV_WOULD_BLOCK || retval == RECV_ERROR)
-          break;
-        if (retval == RECV_OOB)
-          continue;
-
-        msg->length += m.length;
-        total_bytes_received += m.length;
-
-        if (!agent->bytestream_tcp)
-          break;
-
-        off = 0;
-        for (i = 0; i < n_bufs; i++) {
-          GInputVector *buf = &bufs[i];
-          const gsize start = off;
-          const gsize end = start + buf->size;
-
-          if (m.length > start) {
-            const gsize consumed = MIN (m.length - start, buf->size);
-            buf->buffer = (guint8 *) buf->buffer + consumed;
-            buf->size -= consumed;
-            if (buf->size > 0)
-              break;
-          } else {
-            break;
-          }
-
-          off = end;
-        }
-        bufs += i;
-        n_bufs -= i;
-      } while (n_bufs > 0);
-
-      if (msg->length > 0) {
-        nice_debug_verbose ("%s: %p: received a valid message with %"
-            G_GSIZE_FORMAT " bytes", G_STRFUNC, agent, msg->length);
-        if (has_io_callback) {
-          nice_component_emit_io_callback (agent, component, msg->length);
-        } else {
-          iter->message++;
-        }
-      }
-
-      if (retval == RECV_WOULD_BLOCK) {
-        /* EWOULDBLOCK. */
-        break;
-      } else if (retval == RECV_ERROR) {
-        /* Other error. */
-        nice_debug ("%s: error receiving message", G_STRFUNC);
-        remove_source = TRUE;
-        break;
-      }
-
-      if (has_io_callback && g_source_is_destroyed (g_main_current_source ())) {
-        nice_debug ("Component IO source disappeared during the callback");
-        goto out;
-      }
       has_io_callback = nice_component_has_io_callback (component);
     }
   } else if (has_io_callback) {
@@ -6092,8 +5836,8 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
     RecvStatus retval;
 
     /* Don’t want to trample over partially-valid buffers. */
-    g_assert_cmpuint (component->recv_messages_iter.buffer, ==, 0);
-    g_assert_cmpint (component->recv_messages_iter.offset, ==, 0);
+    g_assert (component->recv_messages_iter.buffer == 0);
+    g_assert (component->recv_messages_iter.offset == 0);
 
     while (!nice_input_message_iter_is_at_end (&component->recv_messages_iter,
         component->recv_messages, component->n_recv_messages)) {

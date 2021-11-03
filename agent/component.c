@@ -388,9 +388,6 @@ nice_component_close (NiceAgent *agent, NiceStream *stream, NiceComponent *cmp)
   }
 
   g_free (cmp->recv_buffer);
-  g_free (cmp->rfc4571_buffer);
-  cmp->recv_buffer = NULL;
-  cmp->rfc4571_buffer = NULL;
 }
 
 /*
@@ -436,7 +433,7 @@ nice_component_find_pair (NiceComponent *cmp, NiceAgent *agent, const gchar *lfo
  * session.
  */
 void
-nice_component_restart (NiceComponent *cmp)
+nice_component_restart (NiceComponent *cmp, NiceAgent *agent)
 {
   GSList *i;
   IncomingCheck *c;
@@ -465,6 +462,13 @@ nice_component_restart (NiceComponent *cmp)
   cmp->selected_pair.priority = 0;
 
   cmp->have_local_consent = TRUE;
+
+  /* The stun agent may contain references to the password previously
+   * stored in some remote candidates, freeed here, that were used by
+   * keep-alive stun requests. The stun agent must be reset to get rid
+   * of these references.
+   */
+  nice_agent_init_stun_agent (agent, &cmp->stun_agent);
 
   /* note: component state managed by agent */
 }
@@ -949,8 +953,8 @@ nice_component_emit_io_callback (NiceAgent *agent, NiceComponent *component,
     return;
 
   g_assert (NICE_IS_AGENT (agent));
-  g_assert_cmpuint (stream_id, >, 0);
-  g_assert_cmpuint (component_id, >, 0);
+  g_assert (stream_id > 0);
+  g_assert (component_id > 0);
   g_assert (io_callback != NULL);
 
   /* Only allocate a closure if the callback is being deferred to an idle
@@ -1125,9 +1129,6 @@ nice_component_init (NiceComponent *component)
 
   component->recv_buffer = g_malloc (MAX_BUFFER_SIZE);
   component->recv_buffer_size = MAX_BUFFER_SIZE;
-
-  component->rfc4571_buffer_size = sizeof (guint16) + G_MAXUINT16;
-  component->rfc4571_buffer = g_malloc (component->rfc4571_buffer_size);
 }
 
 static void
@@ -1303,9 +1304,6 @@ static gboolean
 component_source_prepare (GSource *source, gint *timeout_)
 {
   ComponentSource *component_source = (ComponentSource *) source;
-  /* We can’t be sure if the ComponentSource itself needs to be dispatched until
-   * poll() is called on all the child sources. */
-  gboolean skip_poll = FALSE;
   NiceAgent *agent;
   NiceComponent *component;
   GSList *parentl, *childl;
@@ -1322,11 +1320,6 @@ component_source_prepare (GSource *source, gint *timeout_)
           &component))
     goto done;
 
-  if (component->rfc4571_wakeup_needed) {
-    component->rfc4571_wakeup_needed = FALSE;
-    skip_poll = TRUE;
-    goto done;
-  }
 
   if (component->socket_sources_age ==
       component_source->component_socket_sources_age)
@@ -1400,7 +1393,9 @@ component_source_prepare (GSource *source, gint *timeout_)
   agent_unlock_and_emit (agent);
   g_object_unref (agent);
 
-  return skip_poll;
+  /* We can’t be sure if the ComponentSource itself needs to be dispatched until
+   * poll() is called on all the child sources. */
+  return FALSE;
 }
 
 static gboolean
@@ -1663,10 +1658,4 @@ nice_component_get_sockets (NiceComponent *component)
   }
 
   return array;
-}
-
-guint
-nice_component_compute_rfc4571_headroom (NiceComponent *component)
-{
-  return component->rfc4571_buffer_offset - component->rfc4571_frame_offset;
 }

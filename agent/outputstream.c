@@ -466,7 +466,7 @@ nice_output_stream_write (GOutputStream *stream, const void *buffer, gsize count
   write_data_unref (write_data);
 
   g_object_unref (agent);
-  g_assert_cmpint (len, !=, 0);
+  g_assert (len != 0);
 
   return len;
 }
@@ -487,21 +487,11 @@ nice_output_stream_close (GOutputStream *stream, GCancellable *cancellable,
 
   agent_lock (agent);
 
-  /* Shut down the write side of the TCP stream. */
+  /* Shut down the write side of the pseudo-TCP stream. */
   if (agent_find_component (agent, priv->stream_id, priv->component_id,
-          &_stream, &component)) {
-    GSList *i;
-
-    if (!pseudo_tcp_socket_is_closed (component->tcp)) {
-      pseudo_tcp_socket_shutdown (component->tcp, PSEUDO_TCP_SHUTDOWN_WR);
-    }
-
-    for (i = component->socket_sources; i; i = i->next) {
-      SocketSource *source = i->data;
-      NiceSocket *sock = source->socket;
-      if (sock->type == NICE_SOCKET_TYPE_TCP_BSD)
-        g_socket_shutdown (sock->fileno, FALSE, TRUE, NULL);
-    }
+          &_stream, &component) && agent->reliable &&
+      !pseudo_tcp_socket_is_closed (component->tcp)) {
+    pseudo_tcp_socket_shutdown (component->tcp, PSEUDO_TCP_SHUTDOWN_WR);
   }
 
   agent_unlock (agent);

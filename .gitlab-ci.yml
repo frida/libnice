@@ -1,6 +1,3 @@
-include:
- - remote: "https://gitlab.freedesktop.org/freedesktop/ci-templates/-/raw/7ea696055e322cc7aa4bcbe5422b56a198c4bdff/templates/ci-fairy.yml"
-
 stages:
  - verify
  - build
@@ -10,7 +7,8 @@ stages:
 workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == 'latest-release'
 
 default:
   image: registry.freedesktop.org/libnice/libnice/centos7/meson-build
@@ -18,15 +16,21 @@ default:
 #
 # Check "allow-edit" checkbox on merge requests with ci-fairy
 #
-check allow-edit:
-  extends: '.fdo.ci-fairy'
+
+include:
+  - project: 'freedesktop/ci-templates'
+    file: '/templates/ci-fairy.yml'
+
+check-allow-collaboration:
+  extends:
+    - .fdo.ci-fairy
+  script:
+   - ci-fairy check-merge-request --require-allow-collaboration
   interruptible: true
   needs: []
   stage: 'verify'
   variables:
     GIT_STRATEGY: 'none'
-  script:
-    - ci-fairy check-merge-request --require-allow-collaboration
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
@@ -51,7 +55,7 @@ build:
 
 
 .build windows:
-  image: 'registry.freedesktop.org/gstreamer/gst-ci/amd64/windows:2021-02-24.0-master'
+  image: 'registry.freedesktop.org/gstreamer/gstreamer/amd64/windows:2021-10-01.0-master'
   stage: 'build'
   interruptible: true
   tags:
@@ -64,20 +68,14 @@ build:
     # Make sure any failure in PowerShell scripts is fatal
     ErrorActionPreference: 'Stop'
     WarningPreference: 'Stop'
-  before_script:
-    # Make sure powershell exists on errors
-    # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-6
-    - $ErrorActionPreference = "Stop"
-    - pip3 install -U meson==0.56.2
-
 
 build msys2:
   extends: .build windows
+  allow_failure: true
   before_script:
     # Make sure powershell exists on errors
     # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-6
     - $ErrorActionPreference = "Stop"
-    - pip3 install -U meson==0.56.2
 
     # For some reason docker build hangs if this is included in the image, needs more troubleshooting
     - $env:PATH += ';C:\msys64\usr\bin;C:\msys64\mingw64\bin;C:\msys64\mingw32\bin'
@@ -142,11 +140,9 @@ build msys2:
     #
     # Gitlab Runner issue: https://gitlab.com/gitlab-org/gitlab-runner/issues/4291
     # Blocked upgrade issue: https://gitlab.freedesktop.org/gstreamer/gst-ci/issues/6#note_192780
-    - New-Item -Path subprojects -Name openssl.wrap -Value "[wrap-git]`r`ndirectory=openssl`r`nurl=https://gitlab.freedesktop.org/libnice/openssl-binaries-for-ci.git`r`nrevision=1.1.1c`r`n"
     - cmd.exe /C "C:\BuildTools\Common7\Tools\VsDevCmd.bat -host_arch=amd64 -arch=$env:ARCH &&
         meson subprojects download &&
         meson wrap promote subprojects\glib-$env:GLIB_VERSION\subprojects\libffi.wrap &&
-        meson wrap promote subprojects\glib-$env:GLIB_VERSION\subprojects\zlib.wrap &&
         meson wrap promote subprojects\glib-$env:GLIB_VERSION\subprojects\proxy-libintl.wrap &&
         meson subprojects download"
     - cmd.exe /C "C:\BuildTools\Common7\Tools\VsDevCmd.bat -host_arch=amd64 -arch=$env:ARCH &&
@@ -163,7 +159,46 @@ build msvc x86:
   extends: .build msvc
   variables:
     ARCH: 'x86'
-        
+
+.build msvc openssl:
+  extends: .build windows
+  variables:
+    GLIB_VERSION: 2.64.2
+  script:
+    # For some reason, options are separated by newline instead of space, so we
+    # have to replace them first.
+    - $env:MESON_ARGS = $env:MESON_ARGS.replace("`n"," ")
+    - $env:MESON_ARGS += " -Dcrypto-library=openssl"
+
+    # Build and run the tests.
+    # This is part of the same job due to a bug in the gitlab-runner
+    # that prevents us from exporting artifacts with docker-windows
+    # executors. It has since been fixed in gitlab 12.1, but
+    # we are blocked from upgrading currently.
+    #
+    # Gitlab Runner issue: https://gitlab.com/gitlab-org/gitlab-runner/issues/4291
+    # Blocked upgrade issue: https://gitlab.freedesktop.org/gstreamer/gst-ci/issues/6#note_192780
+    - New-Item -Path subprojects -Name openssl.wrap -Value "[wrap-git]`r`ndirectory=openssl`r`nurl=https://gitlab.freedesktop.org/libnice/openssl-binaries-for-ci.git`r`nrevision=1.1.1c`r`n"
+    - cmd.exe /C "C:\BuildTools\Common7\Tools\VsDevCmd.bat -host_arch=amd64 -arch=$env:ARCH &&
+        meson subprojects download &&
+        meson wrap promote subprojects\glib-$env:GLIB_VERSION\subprojects\libffi.wrap &&
+        meson wrap promote subprojects\glib-$env:GLIB_VERSION\subprojects\proxy-libintl.wrap &&
+        meson subprojects download"
+    - cmd.exe /C "C:\BuildTools\Common7\Tools\VsDevCmd.bat -host_arch=amd64 -arch=$env:ARCH &&
+        meson build $env:MESON_ARGS &&
+        ninja -C build &&
+        meson test -C build --print-errorlogs --suite libnice"
+
+build msvc amd64 openssl:
+  extends: .build msvc openssl
+  variables:
+    ARCH: 'amd64'
+
+build msvc x86 openssl:
+  extends: .build msvc openssl
+  variables:
+    ARCH: 'x86'
+
 test:
   stage: test
   interruptible: true

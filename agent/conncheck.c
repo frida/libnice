@@ -80,6 +80,7 @@ static CandidateCheckPair *priv_conn_check_add_for_candidate_pair_matched (
     NiceCandidate *local, NiceCandidate *remote, NiceCheckState initial_state);
 static gboolean priv_conn_keepalive_tick_agent_locked (NiceAgent *agent,
     gpointer pointer);
+static void priv_schedule_next (NiceAgent *agent);
 
 static gint64 priv_timer_remainder (gint64 timer, gint64 now)
 {
@@ -303,8 +304,10 @@ priv_add_pair_to_triggered_check_queue (NiceAgent *agent, CandidateCheckPair *pa
   g_assert (pair);
 
   if (agent->triggered_check_queue == NULL ||
-      g_slist_find (agent->triggered_check_queue, pair) == NULL)
+      g_slist_find (agent->triggered_check_queue, pair) == NULL) {
     agent->triggered_check_queue = g_slist_append (agent->triggered_check_queue, pair);
+    priv_schedule_next (agent);
+  }
 }
 
 /* Remove the pair from the triggered checks list
@@ -630,6 +633,20 @@ candidate_check_pair_fail (NiceStream *stream, NiceAgent *agent, CandidateCheckP
   component = nice_stream_find_component_by_id (stream, p->component_id);
   SET_PAIR_STATE (agent, p, NICE_CHECK_FAILED);
   priv_free_all_stun_transactions (p, component);
+
+  /* Ensure related succeeded-discovered pairs change to state failed
+   * simultaneously, to avoid leaving dangling pointers if one is freeed
+   * while the other is still in the conncheck list. Such transition is
+   * very rare, and only occurs in regular nomination mode, when the
+   * network conditions change between the time the pair is initially
+   * discovered and the time it is rechecked with the use-candidate
+   * flag.
+   */
+  if (p->discovered_pair != NULL) {
+    nice_debug ("Agent %p : related discovered pair %p of pair %p "
+        "will fail too.", agent, p->discovered_pair, p);
+    SET_PAIR_STATE (agent, p->discovered_pair, NICE_CHECK_FAILED);
+  }
 }
 
 /*
@@ -963,10 +980,10 @@ priv_conn_check_tick_stream_nominate (NiceAgent *agent, NiceStream *stream)
                * to test its parent pair instead.
                */
               if (p->succeeded_pair != NULL) {
-                g_assert_cmpint (p->state, ==, NICE_CHECK_DISCOVERED);
+                g_assert (p->state == NICE_CHECK_DISCOVERED);
                 p = p->succeeded_pair;
               }
-              g_assert_cmpint (p->state, ==, NICE_CHECK_SUCCEEDED);
+              g_assert (p->state == NICE_CHECK_SUCCEEDED);
 
               if (this_component_pair == NULL)
                 /* highest priority pair */
@@ -1729,7 +1746,7 @@ static gboolean priv_turn_allocate_refresh_tick_agent_locked (NiceAgent *agent,
 /*
  * Initiates the next pending connectivity check.
  */
-void conn_check_schedule_next (NiceAgent *agent)
+static void priv_schedule_next (NiceAgent *agent)
 {
   if (agent->discovery_unsched_items > 0)
     nice_debug ("Agent %p : WARN: starting conn checks before local candidate gathering is finished.", agent);
@@ -2123,7 +2140,7 @@ static void priv_update_check_list_failed_components (NiceAgent *agent, NiceStre
     for (i = stream->conncheck_list; i; i = i->next) {
       CandidateCheckPair *p = i->data;
 
-      g_assert_cmpuint (p->stream_id, ==, stream->id);
+      g_assert (p->stream_id == stream->id);
 
       if (p->component_id == (c + 1)) {
         if (p->nominated)
@@ -2229,7 +2246,7 @@ static void priv_mark_pair_nominated (NiceAgent *agent, NiceStream *stream, Nice
       if (pair->state == NICE_CHECK_SUCCEEDED &&
           pair->discovered_pair != NULL) {
         pair = pair->discovered_pair;
-        g_assert_cmpint (pair->state, ==, NICE_CHECK_DISCOVERED);
+        g_assert (pair->state == NICE_CHECK_DISCOVERED);
       }
 
       /* If the received Binding request triggered a new check to be
@@ -2348,6 +2365,8 @@ static CandidateCheckPair *priv_add_new_check_pair (NiceAgent *agent,
 
   stream->conncheck_list = g_slist_insert_sorted (stream->conncheck_list, pair,
       (GCompareFunc)conn_check_compare);
+
+  priv_schedule_next (agent);
 
   nice_debug ("Agent %p : added a new pair %p with foundation '%s' and "
       "transport %s:%s to stream %u component %u",
@@ -3088,7 +3107,7 @@ static gboolean priv_schedule_triggered_check (NiceAgent *agent, NiceStream *str
          * use the parent succeeded pair instead */
 
         if (p->succeeded_pair != NULL) {
-          g_assert_cmpint (p->state, ==, NICE_CHECK_DISCOVERED);
+          g_assert (p->state == NICE_CHECK_DISCOVERED);
           p = p->succeeded_pair;
         }
 
@@ -3127,20 +3146,17 @@ static gboolean priv_schedule_triggered_check (NiceAgent *agent, NiceStream *str
                 /* If the component for this pair is in failed state, move it
                  * back to connecting, and reinitiate the timers
                  */
-                if (component->state == NICE_COMPONENT_STATE_FAILED) {
+                if (component->state == NICE_COMPONENT_STATE_FAILED)
                   agent_signal_component_state_change (agent, stream->id,
                       component->id, NICE_COMPONENT_STATE_CONNECTING);
-                  conn_check_schedule_next (agent);
                 /* If the component if in ready state, move it back to
                  * connected as this failed pair with a higher priority
                  * than the nominated pair requires to pursue the
                  * conncheck
                  */
-                } else if (component->state == NICE_COMPONENT_STATE_READY) {
+                else if (component->state == NICE_COMPONENT_STATE_READY)
                   agent_signal_component_state_change (agent, stream->id,
                       component->id, NICE_COMPONENT_STATE_CONNECTED);
-                  conn_check_schedule_next (agent);
-                }
             }
             break;
 	  case NICE_CHECK_SUCCEEDED:
@@ -3435,6 +3451,14 @@ static CandidateCheckPair *priv_process_response_check_for_reflexive(NiceAgent *
      */
     if (new_pair == p)
       p->valid = TRUE;
+    else
+      /* this new_pair distinct from p may also be in state failed (if
+       * the related succeeded pair p was in state failed previously, but
+       * retriggered a successful check a bit later), so we force its
+       * state back to discovered there.
+       */
+      SET_PAIR_STATE (agent, new_pair, NICE_CHECK_DISCOVERED);
+
     SET_PAIR_STATE (agent, p, NICE_CHECK_SUCCEEDED);
     priv_remove_pair_from_triggered_check_queue (agent, p);
     priv_free_all_stun_transactions (p, component);
@@ -4087,9 +4111,6 @@ static gboolean priv_map_reply_to_relay_request (NiceAgent *agent, StunMessage *
                   resp);
             }
             priv_add_new_turn_refresh (agent, d, relay_cand, lifetime);
-
-            /* In case a new candidate has been added */
-            conn_check_schedule_next (agent);
           }
 
           d->stun_message.buffer = NULL;

@@ -235,7 +235,7 @@ nice_candidate_equal_target (const NiceCandidate *candidate1,
  *
  * Returns: a static string with the candidate type
  *
- * Since: 0.1.18
+ * Since: 0.1.19
  */
 const gchar *
 nice_candidate_type_to_string (NiceCandidateType type);
@@ -249,7 +249,7 @@ nice_candidate_type_to_string (NiceCandidateType type);
  *
  * Returns: a static string with the candidate transport
  *
- * Since: 0.1.18
+ * Since: 0.1.19
  */
 const gchar *
 nice_candidate_transport_to_string (NiceCandidateTransport transport);

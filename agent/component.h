@@ -241,16 +241,6 @@ struct _NiceComponent {
    */
   guint8 *recv_buffer;
   guint recv_buffer_size;
-
-  /* ICE-TCP frame state */
-  guint8 *rfc4571_buffer;
-  guint rfc4571_buffer_offset;
-  guint rfc4571_buffer_size;
-  guint rfc4571_frame_offset;
-  guint rfc4571_frame_size;
-  guint rfc4571_consumed_size;
-  NiceAddress rfc4571_remote_addr;
-  gboolean rfc4571_wakeup_needed;
 };
 
 typedef struct {
@@ -271,7 +261,7 @@ nice_component_find_pair (NiceComponent *component, NiceAgent *agent,
     const gchar *lfoundation, const gchar *rfoundation, CandidatePair *pair);
 
 void
-nice_component_restart (NiceComponent *component);
+nice_component_restart (NiceComponent *component, NiceAgent *agent);
 
 void
 nice_component_update_selected_pair (NiceAgent *agent, NiceComponent *component,
@@ -340,9 +330,6 @@ nice_component_verify_remote_candidate (NiceComponent *component,
 
 GPtrArray *
 nice_component_get_sockets (NiceComponent *component);
-
-guint
-nice_component_compute_rfc4571_headroom (NiceComponent *component);
 
 G_END_DECLS
 
