@@ -2348,7 +2348,9 @@ static CandidateCheckPair *priv_add_new_check_pair (NiceAgent *agent,
   priority = agent_candidate_pair_priority (agent, (NiceCandidate *) local,
       (NiceCandidate *) remote);
 
-  if (component->selected_pair.priority &&
+  /* if renomination is supported, we still need to create low priority pair
+   * because it would possibly be nominated in future */
+  if (!agent->support_renomination && component->selected_pair.priority &&
       priority < component->selected_pair.priority) {
     gchar prio1[NICE_CANDIDATE_PAIR_PRIORITY_MAX_SIZE];
     gchar prio2[NICE_CANDIDATE_PAIR_PRIORITY_MAX_SIZE];
