@@ -4501,13 +4501,25 @@ static gboolean conn_check_handle_renomination (NiceAgent *agent, NiceStream *st
      * selected pair's priority so this pair gets SELECTED!
      */
     if (component->selected_pair.priority &&
-        component->selected_pair.remote && component->selected_pair.remote != (NiceCandidateImpl *) remote_candidate &&
-        component->selected_pair.local && component->selected_pair.local != (NiceCandidateImpl *) local_candidate) {
+        component->selected_pair.remote && component->selected_pair.local &&
+        /* local OR remote candidate differ from current selected pair */
+        (component->selected_pair.remote != (NiceCandidateImpl *) remote_candidate ||
+        component->selected_pair.local != (NiceCandidateImpl *) local_candidate)) {
       for (lst = stream->conncheck_list; lst; lst = lst->next) {
         CandidateCheckPair *pair = lst->data;
         if (pair->local == local_candidate && pair->remote == remote_candidate) {
           if (pair->valid) {
             pair->priority = component->selected_pair.priority + 1;
+            if (nice_debug_is_enabled ()) {
+              gchar sel_remote_str[INET6_ADDRSTRLEN];
+              gchar sel_local_str[INET6_ADDRSTRLEN];
+              nice_address_to_string(&component->selected_pair.remote->c.addr, sel_remote_str);
+              nice_address_to_string(&component->selected_pair.local->c.addr, sel_local_str);
+              nice_debug ("Agent %p : pair %p: setting priority to %lu to replace currently selected pair [%s]:%u -> [%s]:%u",
+                  agent, pair, pair->priority,
+                  sel_remote_str, nice_address_get_port (&component->selected_pair.remote->c.addr),
+                  sel_local_str, nice_address_get_port (&component->selected_pair.local->c.addr));
+            }
           }
           break;
         }
