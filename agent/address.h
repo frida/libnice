@@ -260,7 +260,7 @@ gboolean
 nice_address_equal_no_port (const NiceAddress *a, const NiceAddress *b);
 
 /**
- * nice_address_to_string:
+ * nice_address_to_string: (skip)
  * @addr: The #NiceAddress to query
  * @dst: The string to fill
  *
@@ -269,6 +269,17 @@ nice_address_equal_no_port (const NiceAddress *a, const NiceAddress *b);
  */
 void
 nice_address_to_string (const NiceAddress *addr, gchar *dst);
+
+/**
+ * nice_address_to_string_dup:
+ * @addr: The #NiceAddress to query
+ *
+ * Transforms the address @addr into a newly allocated human readable string
+ *
+ * Returns: (transfer full): the address string
+ */
+char *
+nice_address_to_string_dup (const NiceAddress *addr);
 
 /**
  * nice_address_is_private:
