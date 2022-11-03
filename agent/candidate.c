@@ -88,6 +88,9 @@ nice_candidate_free (NiceCandidate *candidate)
   if (c->turn)
     turn_server_unref (c->turn);
 
+  if (c->stun_server)
+    nice_address_free (c->stun_server);
+
   g_slice_free (NiceCandidateImpl, c);
 }
 
@@ -158,11 +161,11 @@ nice_candidate_ice_local_preference_full (guint direction_preference,
 }
 
 static guint
-nice_candidate_ip_local_preference (const NiceCandidate *candidate,
-    GList *local_ips)
+nice_candidate_ip_local_preference (const NiceCandidate *candidate)
 {
   guint preference = 0;
   gchar ip_string[INET6_ADDRSTRLEN];
+  GList/*<owned gchar*>*/ *ips = NULL;
   GList/*<unowned gchar*>*/ *iter;
 
   /* Ensure otherwise identical host candidates with only different IP addresses
@@ -180,7 +183,9 @@ nice_candidate_ip_local_preference (const NiceCandidate *candidate,
     nice_address_to_string (&candidate->base_addr, ip_string);
   }
 
-  for (iter = local_ips; iter; iter = g_list_next (iter)) {
+  ips = nice_interfaces_get_local_ips (TRUE);
+
+  for (iter = ips; iter; iter = g_list_next (iter)) {
     /* Strip the IPv6 link-local scope string */
     gchar **tokens = g_strsplit (iter->data, "%", 2);
     gboolean match = (g_strcmp0 (ip_string, tokens[0]) == 0);
@@ -190,12 +195,13 @@ nice_candidate_ip_local_preference (const NiceCandidate *candidate,
     ++preference;
   }
 
+  g_list_free_full (ips, g_free);
+
   return preference;
 }
 
 static guint16
-nice_candidate_ice_local_preference (const NiceCandidate *candidate,
-    GList *local_ips)
+nice_candidate_ice_local_preference (const NiceCandidate *candidate)
 {
   const NiceCandidateImpl *c = (NiceCandidateImpl *) candidate;
   guint direction_preference = 0;
@@ -239,8 +245,7 @@ nice_candidate_ice_local_preference (const NiceCandidate *candidate,
   }
 
   return nice_candidate_ice_local_preference_full (direction_preference,
-      turn_preference,
-      nice_candidate_ip_local_preference (candidate, local_ips));
+      turn_preference, nice_candidate_ip_local_preference (candidate));
 }
 
 static guint16
@@ -265,8 +270,7 @@ nice_candidate_ms_ice_local_preference_full (guint transport_preference,
 }
 
 static guint32
-nice_candidate_ms_ice_local_preference (const NiceCandidate *candidate,
-    GList *local_ips)
+nice_candidate_ms_ice_local_preference (const NiceCandidate *candidate)
 {
   const NiceCandidateImpl *c = (NiceCandidateImpl *) candidate;
   guint transport_preference = 0;
@@ -300,7 +304,7 @@ nice_candidate_ms_ice_local_preference (const NiceCandidate *candidate,
 
   return nice_candidate_ms_ice_local_preference_full(transport_preference,
       direction_preference, turn_preference,
-      nice_candidate_ip_local_preference (candidate, local_ips));
+      nice_candidate_ip_local_preference (candidate));
 }
 
 static guint8
@@ -345,15 +349,14 @@ nice_candidate_ice_type_preference (const NiceCandidate *candidate,
 
 guint32
 nice_candidate_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted, GList *local_ips)
+    gboolean reliable, gboolean nat_assisted)
 {
   guint8 type_preference;
   guint16 local_preference;
 
   type_preference = nice_candidate_ice_type_preference (candidate, reliable,
       nat_assisted);
-  local_preference = nice_candidate_ice_local_preference (candidate,
-      local_ips);
+  local_preference = nice_candidate_ice_local_preference (candidate);
 
   return nice_candidate_ice_priority_full (type_preference, local_preference,
       candidate->component_id);
@@ -361,15 +364,14 @@ nice_candidate_ice_priority (const NiceCandidate *candidate,
 
 guint32
 nice_candidate_ms_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted, GList *local_ips)
+    gboolean reliable, gboolean nat_assisted)
 {
   guint8 type_preference;
   guint16 local_preference;
 
   type_preference = nice_candidate_ice_type_preference (candidate, reliable,
       nat_assisted);
-  local_preference = nice_candidate_ms_ice_local_preference (candidate,
-      local_ips);
+  local_preference = nice_candidate_ms_ice_local_preference (candidate);
 
   return nice_candidate_ice_priority_full (type_preference, local_preference,
       candidate->component_id);
@@ -415,6 +417,8 @@ nice_candidate_copy (const NiceCandidate *candidate)
   copy->turn = NULL;
   copy->c.username = g_strdup (copy->c.username);
   copy->c.password = g_strdup (copy->c.password);
+  if (copy->stun_server)
+    copy->stun_server = nice_address_dup (copy->stun_server);
 
   return (NiceCandidate *) copy;
 }
@@ -462,5 +466,32 @@ nice_candidate_transport_to_string (NiceCandidateTransport transport)
       return "tcp-so";
     default:
       g_assert_not_reached ();
+  }
+}
+
+NICEAPI_EXPORT void
+nice_candidate_relay_address (const NiceCandidate *candidate, NiceAddress *addr)
+{
+  const NiceCandidateImpl *c = (NiceCandidateImpl *) candidate;
+
+  g_return_if_fail (candidate != NULL);
+  g_return_if_fail (candidate->type != NICE_CANDIDATE_TYPE_RELAYED);
+
+  *addr = c->turn->server;
+}
+
+NICEAPI_EXPORT gboolean
+nice_candidate_stun_server_address (const NiceCandidate *candidate, NiceAddress *addr)
+{
+  const NiceCandidateImpl *c = (NiceCandidateImpl *) candidate;
+
+  g_return_val_if_fail (candidate != NULL, FALSE);
+  g_return_val_if_fail (candidate->type != NICE_CANDIDATE_TYPE_SERVER_REFLEXIVE, FALSE);
+
+  if (c->stun_server) {
+    *addr = *c->stun_server;
+    return TRUE;
+  } else {
+    return FALSE;
   }
 }

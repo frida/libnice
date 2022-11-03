@@ -1,17 +1,16 @@
 stages:
  - verify
+ - containers
  - build
  - test
  - deploy
 
 workflow:
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - if: $CI_COMMIT_BRANCH == 'latest-release'
-
-default:
-  image: registry.freedesktop.org/libnice/libnice/centos7/meson-build
+    - if: $CI_COMMIT_BRANCH == "latest-release"
+    - if: $CI_PIPELINE_SOURCE == "web"
 
 #
 # Check "allow-edit" checkbox on merge requests with ci-fairy
@@ -20,6 +19,14 @@ default:
 include:
   - project: 'freedesktop/ci-templates'
     file: '/templates/ci-fairy.yml'
+  - project: 'freedesktop/ci-templates'
+    file: '/templates/centos.yml'
+
+.libnice.centos:7:
+  variables:
+    FDO_DISTRIBUTION_VERSION: '7'
+    FDO_DISTRIBUTION_TAG: '2022-10-17-cov'
+    FDO_UPSTREAM_REPO: 'libnice/libnice'
 
 check-allow-collaboration:
   extends:
@@ -35,8 +42,20 @@ check-allow-collaboration:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
 
+build-centos-container:7:
+  extends:
+  - .fdo.container-build@centos     # the CI template
+  - .libnice.centos:7               # our template job above
+  stage: containers
+  variables:
+    FDO_DISTRIBUTION_PACKAGES: 'git gtk-doc gnutls-devel gupnp-igd-devel gstreamer1-devel gobject-introspection-devel valgrind net-tools centos-release-scl graphviz'
+    FDO_DISTRIBUTION_EXEC: 'tests/docker/centos7-meson/pip-installs.sh'
+
 build:
   stage: build
+  extends:
+  - .fdo.distribution-image@centos
+  - .libnice.centos:7
   interruptible: true
   variables:
     PREFIX: "${CI_PROJECT_DIR}/libnice-prefix"
@@ -47,8 +66,8 @@ build:
   script:
     ## && true to make gitlab-ci happy
     - source scl_source enable rh-python36 && true
-    - meson --werror --warnlevel 2 -Dgtk_doc=enabled --prefix=$PREFIX build/
-    - ninja-build -C build/
+    - meson --werror --warnlevel 2 -Dgtk_doc=enabled --prefix=$PREFIX -Db_coverage=true build/
+    - ninja -C build/
   artifacts:
     paths:
       - build/
@@ -149,6 +168,12 @@ build msys2:
         meson build $env:MESON_ARGS &&
         ninja -C build &&
         meson test -C build --print-errorlogs --suite libnice"
+  artifacts:
+    reports:
+      junit: build/meson-logs/testlog-*.junit.xml
+    when: on_failure
+    paths:
+      - build/meson-logs/
 
 build msvc amd64:
   extends: .build msvc
@@ -201,6 +226,9 @@ build msvc x86 openssl:
 
 test:
   stage: test
+  extends:
+  - .fdo.distribution-image@centos
+  - .libnice.centos:7
   interruptible: true
   needs:
     - build
@@ -209,12 +237,20 @@ test:
   script:
     - ifconfig
     - source scl_source enable rh-python36 && true
+    - ninja -C build/
     - meson test -C build/ --setup debug
+    - ninja -C build coverage
+    - lcov_cobertura build/meson-logs/coverage.info -o build/meson-logs/coverage.xml
+  coverage: '/lines......: \d+\.\d+% /'
   artifacts:
+    reports:
+      junit: build/meson-logs/testlog-*.junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: build/meson-logs/coverage.xml
     when: on_failure
     paths:
       - build/meson-logs/
-
 
 test valgrind:
   extends: test
@@ -222,11 +258,14 @@ test valgrind:
     - ifconfig
     - source scl_source enable rh-python36 && true
     - meson configure build -Dgtk_doc=disabled
+    - ninja -C build/
     - meson test -C build/ --setup valgrind --print-errorlogs
-
 
 doc-and-install:
   stage: test
+  extends:
+  - .fdo.distribution-image@centos
+  - .libnice.centos:7
   interruptible: true
   needs:
     - build
@@ -236,8 +275,8 @@ doc-and-install:
     PREFIX: "${CI_PROJECT_DIR}/libnice-prefix"
   script:
     - source scl_source enable rh-python36 && true
-    - ninja-build -C build/ libnice-doc
-    - ninja-build -C build/ install
+    - ninja -C build/ libnice-doc
+    - ninja -C build/ install
     - ls -lR ${PREFIX}
   artifacts:
     paths:
@@ -245,6 +284,9 @@ doc-and-install:
 
 submit-to-coverity:
  stage: test
+ extends:
+  - .fdo.distribution-image@centos
+  - .libnice.centos:7
  variables:
    COVERITY_PROJECT: libnice
    PREFIX: "${CI_PROJECT_DIR}/libnice-prefix"
@@ -261,7 +303,7 @@ submit-to-coverity:
   - meson --werror --warnlevel 2 -Dgtk_doc=disabled -Dinstrospection=disabled --prefix=$PREFIX cov-build/
   - export PATH="$PATH:${CI_PROJECT_DIR}/cov-analysis-linux64/bin"
   - echo $PATH
-  - cov-build --dir cov-int ninja-build -C cov-build
+  - cov-build --dir cov-int ninja -C cov-build
   - tar czvf libnice.tgz cov-int
   - curl --form token=$COVERITY_TOKEN --form email=olivier.crete@ocrete.ca --form file=@libnice.tgz --form version="${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHA}" --form description="CI weekly run" https://scan.coverity.com/builds?project=libnice
 

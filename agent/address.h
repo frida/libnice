@@ -51,6 +51,7 @@
 
 
 #include <glib.h>
+#include <glib-object.h>
 
 #ifdef G_OS_WIN32
 #include <winsock2.h>
@@ -64,6 +65,9 @@
 
 G_BEGIN_DECLS
 
+#define NICE_TYPE_ADDRESS (nice_address_get_type())
+
+GType nice_address_get_type (void);
 
 /**
  * NiceAddress:
@@ -276,6 +280,19 @@ nice_address_to_string (const NiceAddress *addr, gchar *dst);
  */
 gboolean
 nice_address_is_private (const NiceAddress *addr);
+
+/**
+ * nice_address_is_linklocal:
+ * @addr: The #NiceAddress to query
+ *
+ * Verifies if the address in @addr is a link-local address or not
+ *
+ * Returns: %TRUE if @addr is a link-local address, %FALSE otherwise
+ *
+ * Since: 0.1.19
+ */
+gboolean
+nice_address_is_linklocal (const NiceAddress *addr);
 
 /**
  * nice_address_is_valid:

@@ -1,5 +1,5 @@
 project('libnice', 'c',
-  version: '0.1.18.1',
+  version: '0.1.19.1',
   meson_version : '>= 0.52',
   default_options : ['warning_level=1', 'buildtype=debugoptimized'])
 
@@ -20,7 +20,7 @@ endif
 # B is the ABI age, change it on new APIs that don't break existing ones, changing it resets C to 0
 # C is the revision, change on new updates that don't change APIs
 soversion = 10
-libversion = '10.11.0'
+libversion = '10.12.0'
 
 glib_req = '>= 2.54'
 gnutls_req = '>= 2.12.0'
@@ -28,14 +28,6 @@ gupnp_igd_req = '>= 0.2.4'
 gst_req = '>= 1.0.0'
 
 nice_datadir = join_paths(get_option('prefix'), get_option('datadir'))
-
-ndebug = get_option('b_ndebug')
-if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
-  add_project_arguments('-DG_DISABLE_CAST_CHECKS',
-    '-DG_DISABLE_ASSERT',
-    '-DG_DISABLE_CHECKS',
-    language: 'c')
-endif
 
 cc = meson.get_compiler('c')
 
@@ -86,7 +78,20 @@ add_project_arguments('-D_GNU_SOURCE',
   '-DHAVE_CONFIG_H',
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_' + glib_req_minmax_str,
   '-DGLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_' + glib_req_minmax_str,
+  '-DNICE_VERSION_MAJOR=' + version_major,
+  '-DNICE_VERSION_MINOR=' + version_minor,
+  '-DNICE_VERSION_MICRO=' + version_micro,
+  '-DNICE_VERSION_NANO=' + version_nano,
   language: 'c')
+
+version_conf = configuration_data()
+version_conf.set('NICE_VERSION_MAJOR', version_major)
+version_conf.set('NICE_VERSION_MINOR', version_minor)
+version_conf.set('NICE_VERSION_MICRO', version_micro)
+version_conf.set('NICE_VERSION_NANO', version_nano)
+nice_version_h = configure_file(output: 'nice-version.h',
+  install_dir: get_option('includedir') / 'nice',
+  configuration: version_conf)
 
 cdata = configuration_data()
 
@@ -246,7 +251,7 @@ if not crypto_found and opt_cryptolib != 'gnutls'
 
   if libcrypto_dep.found() and libssl_dep.found()
     crypto_dep = [libcrypto_dep, libssl_dep]
-    cdata.set('HAVE_OPENSSL', crypto_dep.found())
+    cdata.set('HAVE_OPENSSL', true)
     crypto_found = true
   endif
 endif

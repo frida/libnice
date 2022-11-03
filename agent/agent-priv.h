@@ -140,6 +140,7 @@ struct _NiceAgent
   NiceProxyType proxy_type;       /* property: Proxy type */
   gchar *proxy_username;          /* property: Proxy username */
   gchar *proxy_password;          /* property: Proxy password */
+  GHashTable *proxy_extra_headers;/* property: Proxy extra headers */
   gboolean saved_controlling_mode;/* property: controlling-mode */
   guint timer_ta;                 /* property: timer Ta */
   guint max_conn_checks;          /* property: max connectivity checks */
@@ -191,7 +192,6 @@ struct _NiceAgent
                                          conncheck */
   gboolean consent_freshness;         /* rfc 7675 consent freshness with
                                          connchecks */
-  GList *local_ips;                   /* List of local ip addresses */
   /* XXX: add pointer to internal data struct for ABI-safe extensions */
 };
 
@@ -297,11 +297,11 @@ nice_candidate_ice_priority_full (guint type_pref, guint local_pref,
 
 guint32
 nice_candidate_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted, GList *local_ips);
+    gboolean reliable, gboolean nat_assisted);
 
 guint32
 nice_candidate_ms_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted, GList *local_ips);
+    gboolean reliable, gboolean nat_assisted);
 
 guint64
 nice_candidate_pair_priority (guint32 o_prio, guint32 a_prio);

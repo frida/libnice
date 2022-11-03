@@ -61,6 +61,7 @@ main (void)
       break;
     ip_local_preference++;
   }
+  g_list_free_full (ips, g_free);
 
   /* test 0 */
   g_assert_cmpuint (ip_local_preference, <, NICE_CANDIDATE_MAX_LOCAL_ADDRESSES);
@@ -70,22 +71,22 @@ main (void)
   /* Host UDP */
   candidate->transport = NICE_CANDIDATE_TRANSPORT_UDP;
   candidate->component_id = 1;
-  g_assert_cmpuint (nice_candidate_ice_priority (candidate, FALSE, FALSE, ips), ==, 0x782000FF + 0x100 * ip_local_preference );
+  g_assert_cmpuint (nice_candidate_ice_priority (candidate, FALSE, FALSE), ==, 0x782000FF + 0x100 * ip_local_preference );
   /* Host UDP reliable */
-  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, FALSE, ips), ==, 0x3C2000FF + 0x100 * ip_local_preference );
+  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, FALSE), ==, 0x3C2000FF + 0x100 * ip_local_preference );
   /* Host tcp-active unreliable */
   candidate->transport = NICE_CANDIDATE_TRANSPORT_TCP_ACTIVE;
-  g_assert_cmpuint (nice_candidate_ice_priority (candidate, FALSE, FALSE, ips) & 0xFFE000FF, ==, 0x3C8000FF);
+  g_assert_cmpuint (nice_candidate_ice_priority (candidate, FALSE, FALSE) & 0xFFE000FF, ==, 0x3C8000FF);
   /* Host tcp-active reliable */
   candidate->transport = NICE_CANDIDATE_TRANSPORT_TCP_ACTIVE;
   /* Host tcp-active reliable */
-  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, FALSE, ips) & 0xFFE000FF, ==, 0x788000FF);
+  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, FALSE) & 0xFFE000FF, ==, 0x788000FF);
   /* srv-reflexive tcp-active reliable */
   candidate->type = NICE_CANDIDATE_TYPE_SERVER_REFLEXIVE;
   candidate->transport = NICE_CANDIDATE_TRANSPORT_TCP_ACTIVE;
-  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, FALSE, ips) & 0xFFE000FF, ==, 0x648000FF);
+  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, FALSE) & 0xFFE000FF, ==, 0x648000FF);
   /* nat-assisted srv-reflexive tcp-active reliable */
-  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, TRUE, ips) & 0xFFE000FF, ==, 0x698000FF);
+  g_assert_cmpuint (nice_candidate_ice_priority (candidate, TRUE, TRUE) & 0xFFE000FF, ==, 0x698000FF);
   nice_candidate_free (candidate);
 
   /* test 2 */
@@ -96,8 +97,6 @@ main (void)
 
   /* 2^32*1 + 2*5000 + 1 = 4294977297 */
   g_assert_cmpuint (nice_candidate_pair_priority (5000, 1), ==, 4294977297LL);
-
-  g_list_free_full (ips, g_free);
 
   return 0;
 }

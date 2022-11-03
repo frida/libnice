@@ -112,6 +112,7 @@ enum
   PROP_PROXY_PORT,
   PROP_PROXY_USERNAME,
   PROP_PROXY_PASSWORD,
+  PROP_PROXY_EXTRA_HEADERS,
   PROP_UPNP,
   PROP_UPNP_TIMEOUT,
   PROP_RELIABLE,
@@ -612,6 +613,23 @@ nice_agent_class_init (NiceAgentClass *klass)
         "Proxy server password",
         "The password used to authenticate with the proxy",
         NULL,
+        G_PARAM_READWRITE));
+
+  /**
+   * NiceAgent:proxy-extra-headers: (type GLib.HashTable(utf8,utf8))
+   *
+   * Optional extra headers to append to the HTTP proxy CONNECT request.
+   * Provided as key/value-pairs in hash table corresponding to
+   * header-name/header-value.
+   *
+   * Since: 0.1.20
+   */
+  g_object_class_install_property (gobject_class, PROP_PROXY_EXTRA_HEADERS,
+      g_param_spec_boxed (
+        "proxy-extra-headers",
+        "Extra headers for HTTP proxy connect",
+        "Extra headers to append to the HTTP proxy CONNECT request",
+        G_TYPE_HASH_TABLE,
         G_PARAM_READWRITE));
 
   /**
@@ -1427,6 +1445,10 @@ nice_agent_get_property (
       g_value_set_string (value, agent->proxy_password);
       break;
 
+    case PROP_PROXY_EXTRA_HEADERS:
+      g_value_set_boxed (value, agent->proxy_extra_headers);
+      break;
+
     case PROP_UPNP:
 #ifdef HAVE_GUPNP
       g_value_set_boolean (value, agent->upnp_enabled);
@@ -1564,6 +1586,12 @@ nice_agent_reset_all_stun_agents (NiceAgent *agent, gboolean only_software)
 }
 
 static void
+copy_hash_entry (const gchar *key, const gchar *value, GHashTable *hdest)
+{
+    g_hash_table_insert (hdest, g_strdup (key), g_strdup (value));
+}
+
+static void
 nice_agent_set_property (
   GObject *object,
   guint property_id,
@@ -1652,6 +1680,17 @@ nice_agent_set_property (
       agent->proxy_password = g_value_dup_string (value);
       break;
 
+    case PROP_PROXY_EXTRA_HEADERS:{
+      GHashTable *h = g_value_get_boxed (value);
+      if (agent->proxy_extra_headers) {
+        g_hash_table_unref (agent->proxy_extra_headers);
+      }
+      agent->proxy_extra_headers = g_hash_table_new_full (g_str_hash,
+          g_str_equal, g_free, g_free);
+      g_hash_table_foreach (h, (GHFunc)copy_hash_entry,
+          agent->proxy_extra_headers);
+      break;
+    }
     case PROP_UPNP_TIMEOUT:
 #ifdef HAVE_GUPNP
       agent->upnp_timeout = g_value_get_uint (value);
@@ -2673,7 +2712,8 @@ agent_create_tcp_turn_socket (NiceAgent *agent, NiceStream *stream,
             agent->proxy_username, agent->proxy_password);
       } else if (agent->proxy_type == NICE_PROXY_TYPE_HTTP){
         nicesock = nice_http_socket_new (nicesock, server,
-            agent->proxy_username, agent->proxy_password);
+            agent->proxy_username, agent->proxy_password,
+            agent->proxy_extra_headers);
       } else {
         nice_socket_free (nicesock);
         nicesock = NULL;
@@ -3081,6 +3121,7 @@ static void _upnp_mapped_external_port (GUPnPSimpleIgd *self, gchar *proto,
         &externaddr,
         host_candidate->c.transport,
         host_candidate->sockptr,
+        NULL,
         TRUE);
 
     check_upnp_gathering_done (agent, stream);
@@ -3171,7 +3212,8 @@ priv_remove_upnp_mapping (NiceAgent *agent, NiceCandidate *host_candidate)
 
   nice_address_to_string (&host_candidate->addr, local_ip);
 
-  g_print ("REMOVING %s: %d\n", local_ip, nice_address_get_port (&host_candidate->addr));
+  nice_debug ("Removing UPnP mapping %s: %d", local_ip,
+      nice_address_get_port (&host_candidate->addr));
 
   gupnp_simple_igd_remove_port_local (GUPNP_SIMPLE_IGD (agent->upnp),
       host_candidate->transport == NICE_CANDIDATE_TRANSPORT_UDP ? "UDP" :
@@ -3320,15 +3362,12 @@ nice_agent_gather_candidates (
   nice_debug ("Agent %p : In %s mode, starting candidate gathering.", agent,
       agent->full_mode ? "ICE-FULL" : "ICE-LITE");
 
-  if (agent->local_ips == NULL)
-    agent->local_ips = nice_interfaces_get_local_ips (TRUE);
-
   /* if no local addresses added, generate them ourselves */
   if (agent->local_addresses == NULL) {
+    GList *addresses = nice_interfaces_get_local_ips (FALSE);
     GList *item;
-    GList *local_ips_without_loopback = nice_interfaces_get_local_ips (FALSE);
 
-    for (item = local_ips_without_loopback; item; item = g_list_next (item)) {
+    for (item = addresses; item; item = g_list_next (item)) {
       const gchar *addr_string = item->data;
       NiceAddress *addr = nice_address_new ();
 
@@ -3339,7 +3378,8 @@ nice_agent_gather_candidates (
         nice_address_free (addr);
       }
     }
-    g_list_free_full (local_ips_without_loopback, (GDestroyNotify) g_free);
+
+    g_list_free_full (addresses, (GDestroyNotify) g_free);
   } else {
     for (i = agent->local_addresses; i; i = i->next) {
       NiceAddress *addr = i->data;
@@ -3456,6 +3496,7 @@ nice_agent_gather_candidates (
 
         /* TODO: Add server-reflexive support for TCP candidates */
         if (agent->full_mode && agent->stun_server_ip && !agent->force_relay &&
+            !nice_address_is_linklocal (addr) &&
             transport == NICE_CANDIDATE_TRANSPORT_UDP) {
           NiceAddress stun_server;
           if (nice_address_set_from_string (&stun_server, agent->stun_server_ip)) {
@@ -3471,7 +3512,7 @@ nice_agent_gather_candidates (
           }
         }
 
-        if (agent->full_mode && component &&
+        if (agent->full_mode && component && !nice_address_is_linklocal (addr) &&
             transport != NICE_CANDIDATE_TRANSPORT_TCP_PASSIVE) {
           GList *item;
           int host_ip_version = nice_address_ip_version (&host_candidate->c.addr);
@@ -3662,44 +3703,22 @@ nice_agent_set_port_range (NiceAgent *agent, guint stream_id, guint component_id
   agent_unlock_and_emit (agent);
 }
 
-static gint _find_nice_address (gconstpointer a, gconstpointer b)
-{
-  const gchar *addr_a_string = a;
-  const NiceAddress *addr_b = b;
-  NiceAddress addr_a;
-
-  nice_address_set_from_string (&addr_a, addr_a_string);
-  return (nice_address_equal_no_port (&addr_a, addr_b) ? 0 : 1);
-}
-
 NICEAPI_EXPORT gboolean
 nice_agent_add_local_address (NiceAgent *agent, NiceAddress *addr)
 {
   NiceAddress *dupaddr;
-  gboolean ret;
 
   g_return_val_if_fail (NICE_IS_AGENT (agent), FALSE);
   g_return_val_if_fail (addr != NULL, FALSE);
 
   agent_lock (agent);
 
-  if (agent->local_ips == NULL)
-    agent->local_ips = nice_interfaces_get_local_ips (TRUE);
-
-  if (g_list_find_custom (agent->local_ips, addr, _find_nice_address)) {
-    dupaddr = nice_address_dup (addr);
-    nice_address_set_port (dupaddr, 0);
-    agent->local_addresses = g_slist_append (agent->local_addresses, dupaddr);
-    ret = TRUE;
-  } else {
-    gchar tmpbuf[INET6_ADDRSTRLEN];
-    nice_address_to_string (addr, tmpbuf);
-    nice_debug ("Agent %p : local address [%s] does not exist", agent, tmpbuf);
-    ret = FALSE;
-  }
+  dupaddr = nice_address_dup (addr);
+  nice_address_set_port (dupaddr, 0);
+  agent->local_addresses = g_slist_append (agent->local_addresses, dupaddr);
 
   agent_unlock_and_emit (agent);
-  return ret;
+  return TRUE;
 }
 
 /* Recompute foundations of all candidate pairs from a given stream
@@ -4241,6 +4260,7 @@ agent_recv_message_unlocked (
 
   /* We need an address for packet parsing, below. */
   if (message->from == NULL) {
+    nice_address_init (&from);
     message->from = &from;
   }
 
@@ -4581,8 +4601,8 @@ done:
   }
 
   /* Clear local modifications. */
-  if (message->from == &from) {
-    message->from = NULL;
+  if (provided_message->from == &from) {
+    provided_message->from = NULL;
   }
 
   return retval;
@@ -5781,7 +5801,10 @@ nice_agent_dispose (GObject *object)
   agent->proxy_username = NULL;
   g_free (agent->proxy_password);
   agent->proxy_password = NULL;
-
+  if (agent->proxy_extra_headers != NULL) {
+    g_hash_table_unref (agent->proxy_extra_headers);
+    agent->proxy_extra_headers = NULL;
+  }
   nice_rng_free (agent->rng);
   agent->rng = NULL;
 
@@ -5794,8 +5817,6 @@ nice_agent_dispose (GObject *object)
 
   g_free (agent->software_attribute);
   agent->software_attribute = NULL;
-
-  g_list_free_full (agent->local_ips, (GDestroyNotify) g_free);
 
   if (agent->main_context != NULL)
     g_main_context_unref (agent->main_context);
@@ -7398,11 +7419,16 @@ nice_agent_close_async (NiceAgent *agent, GAsyncReadyCallback callback,
   task = g_task_new (agent, NULL, callback, callback_data);
   g_task_set_source_tag (task, nice_agent_close_async);
 
+  /* Hold an extra ref here in case the application releases the last ref
+   * during the callback.
+   */
+  g_object_ref (agent);
   agent_lock (agent);
 
   refresh_prune_agent_async (agent, on_agent_refreshes_pruned, task);
 
   agent_unlock (agent);
+  g_object_unref (agent);
 }
 
 

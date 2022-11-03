@@ -260,9 +260,11 @@ GType nice_agent_get_type (void);
 /**
  * NICE_AGENT_MAX_REMOTE_CANDIDATES:
  *
- * A hard limit for the number of remote candidates. This
- * limit is enforced to protect against malevolent remote
- * clients.
+ * Was a limit on the number of remote candidates one can set, but is
+ * no longer used by libnice itself.
+ *
+ * Deprecated: 0.1.20: Replace with dynamic value based on the
+ * #NiceAgent::max-connectivity-checks property
  */
 #define NICE_AGENT_MAX_REMOTE_CANDIDATES    25
 
@@ -512,8 +514,7 @@ nice_agent_new_full (GMainContext *ctx,
  * </para>
  *
  * See also: nice_agent_gather_candidates()
- * Returns: %TRUE on success, %FALSE when the local address doesn't
- * exists.
+ * Returns: %TRUE on success, %FALSE on fatal (memory allocation) errors
  */
 gboolean
 nice_agent_add_local_address (NiceAgent *agent, NiceAddress *addr);
