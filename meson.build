@@ -230,6 +230,7 @@ if not crypto_dep.found() and opt_cryptolib != 'gnutls'
   crypto_dep = dependency('openssl', required: false,
 			  fallback: ['openssl', 'openssl_dep'])
   cdata.set('HAVE_OPENSSL', crypto_dep.found())
+  add_project_arguments('-DOPENSSL_SUPPRESS_DEPRECATED', language: 'c')
 endif
 
 crypto_found = crypto_dep.found()
