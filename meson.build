@@ -292,6 +292,7 @@ cdata.set('HAVE_GUPNP', gupnp_igd_dep.found(), description: 'Use the GUPnP IGD l
 
 libm = cc.find_library('m', required: false)
 
+root_include = include_directories('.')
 nice_incs = include_directories('.', 'agent', 'random', 'socket', 'stun')
 
 nice_deps = gio_deps + [gthread_dep, crypto_dep, gupnp_igd_dep] + syslibs

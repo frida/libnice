@@ -52,7 +52,7 @@ if build_gir
 endif
 
 libnice_dep = declare_dependency(link_with : libnice,
-  include_directories : [agent_include, nice_include],
+  include_directories : [agent_include, nice_include, root_include],
   # Everything that uses libnice needs this built to compile
   sources : nice_gen_sources,
   dependencies: nice_deps)
