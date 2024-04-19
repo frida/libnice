@@ -1437,7 +1437,7 @@ packet(PseudoTcpSocket *self, guint32 seq, TcpFlags flags,
   priv->ts_lastack = priv->rcv_nxt;
 
   if (len) {
-    gsize bytes_read;
+    G_GNUC_UNUSED gsize bytes_read;
 
     bytes_read = pseudo_tcp_fifo_read_offset (&priv->sbuf, buffer.u8 + HEADER_SIZE,
         len, offset);
@@ -1991,7 +1991,7 @@ process(PseudoTcpSocket *self, Segment *seg)
       }
     } else {
       guint32 nOffset = seg->seq - priv->rcv_nxt;
-      gsize res;
+      G_GNUC_UNUSED gsize res;
 
       res = pseudo_tcp_fifo_write_offset (&priv->rbuf, (guint8 *) seg->data,
           seg->len, nOffset);
@@ -2474,7 +2474,7 @@ resize_receive_buffer (PseudoTcpSocket *self, guint32 new_size)
 {
   PseudoTcpSocketPrivate *priv = self->priv;
   guint8 scale_factor = 0;
-  gboolean result;
+  G_GNUC_UNUSED gboolean result;
   gsize available_space;
 
   if (priv->rbuf_len == new_size)
