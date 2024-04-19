@@ -5971,7 +5971,6 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
   } else if (agent->reliable &&
       nice_socket_is_reliable (socket_source->socket)) {
     NiceInputMessageIter *iter = &component->recv_messages_iter;
-    gsize total_bytes_received = 0;
 
     while (has_io_callback ||
         (component->recv_messages != NULL &&
@@ -6017,7 +6016,6 @@ component_io_cb (GSocket *gsocket, GIOCondition condition, gpointer user_data)
           continue;
 
         msg->length += m.length;
-        total_bytes_received += m.length;
 
         if (!agent->bytestream_tcp)
           break;
