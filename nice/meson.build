@@ -56,6 +56,7 @@ libnice_dep = declare_dependency(link_with : libnice,
   # Everything that uses libnice needs this built to compile
   sources : nice_gen_sources,
   dependencies: nice_deps)
+meson.override_dependency('nice', libnice_dep)
 
 # pkg-config file
 pkg = import('pkgconfig')
