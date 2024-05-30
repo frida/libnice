@@ -41,6 +41,10 @@ cc = meson.get_compiler('c')
 
 syslibs = []
 
+if meson.is_subproject() and cc.get_argument_syntax() != 'msvc'
+  add_project_arguments('-w', language: 'c')
+endif
+
 if cc.get_id() == 'msvc'
   add_project_arguments(
       cc.get_supported_arguments(['/utf-8']), # set the input encoding to utf-8
