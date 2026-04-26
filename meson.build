@@ -225,6 +225,12 @@ if opt_cryptolib == 'auto' and host_machine.system() == 'windows'
   cdata.set('USE_WIN32_CRYPTO', crypto_dep.found())
 endif
 
+if opt_cryptolib == 'auto' and host_machine.system() == 'darwin'
+  # CommonCrypto + arc4random_buf ship in libSystem; no extra link needed.
+  crypto_dep = declare_dependency()
+  cdata.set('USE_APPLE_CRYPTO', true)
+endif
+
 if not crypto_dep.found() and opt_cryptolib != 'openssl'
   crypto_dep = dependency('gnutls', version: gnutls_req, required: false)
   cdata.set('HAVE_GNUTLS', crypto_dep.found())
