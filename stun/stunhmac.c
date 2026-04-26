@@ -55,6 +55,9 @@ typedef struct _StunKeyBlob {
   DWORD key_size;
   BYTE key_data[0];
 } StunKeyBlob;
+#elif defined(USE_APPLE_CRYPTO)
+#include <CommonCrypto/CommonDigest.h>
+#include <CommonCrypto/CommonHMAC.h>
 #elif defined(HAVE_OPENSSL)
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
@@ -130,6 +133,26 @@ void stun_sha1 (const uint8_t *msg, size_t len, size_t msg_len, uint8_t *sha,
   TRY (CryptDestroyHash (hash));
   TRY (CryptDestroyKey (key_handle));
   TRY (CryptReleaseContext (prov, 0));
+}
+#elif defined(USE_APPLE_CRYPTO)
+{
+  CCHmacContext ctx;
+
+  CCHmacInit (&ctx, kCCHmacAlgSHA1, key, keylen);
+
+  CCHmacUpdate (&ctx, msg, 2);
+  CCHmacUpdate (&ctx, &fakelen, 2);
+  CCHmacUpdate (&ctx, msg + 4, len - 28);
+
+  /* RFC 3489 specifies that the message's size should be 64 bytes,
+     and \x00 padding should be done */
+  if (padding && ((len - 24) % 64) > 0) {
+    uint16_t pad_size = 64 - ((len - 24) % 64);
+
+    CCHmacUpdate (&ctx, pad_char, pad_size);
+  }
+
+  CCHmacFinal (&ctx, sha);
 }
 #elif defined(HAVE_OPENSSL)
 {
@@ -257,6 +280,21 @@ void stun_hash_creds (const uint8_t *realm, size_t realm_len,
 
   CryptDestroyHash (hash);
   CryptReleaseContext (prov, 0);
+#elif defined(USE_APPLE_CRYPTO)
+{
+  CC_MD5_CTX ctx;
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  CC_MD5_Init (&ctx);
+  CC_MD5_Update (&ctx, username_trimmed, username_len);
+  CC_MD5_Update (&ctx, colon, 1);
+  CC_MD5_Update (&ctx, realm_trimmed, realm_len);
+  CC_MD5_Update (&ctx, colon, 1);
+  CC_MD5_Update (&ctx, password_trimmed, password_len);
+  CC_MD5_Final (md5, &ctx);
+#pragma clang diagnostic pop
+}
 #elif defined(HAVE_OPENSSL)
   EVP_MD_CTX *ctx;
 
