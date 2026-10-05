@@ -56,8 +56,9 @@
 typedef struct {
   NiceTurnSocketCompatibility compatibility;
   union {
-    guint8 u8[65536];
-    guint16 u16[32768];
+    /* max valid STUN msg size (20 B header + largest multiple of 4 ≤ 65535) */
+    guint8 u8[65552]; 
+    guint16 u16[32776];
   } recv_buf;
   gsize recv_buf_len;  /* in bytes */
   guint expecting_len;
@@ -77,7 +78,8 @@ typedef enum {
 
 static void socket_close (NiceSocket *sock);
 static gint socket_recv_messages (NiceSocket *sock,
-    NiceInputMessage *recv_messages, guint n_recv_messages);
+    NiceInputMessage *recv_messages, guint n_recv_messages,
+    NiceMessageExtraData *exdata);
 static gint socket_send_messages (NiceSocket *sock, const NiceAddress *to,
     const NiceOutputMessage *messages, guint n_messages);
 static gint socket_send_messages_reliable (NiceSocket *sock,
@@ -158,7 +160,8 @@ socket_recv_message (NiceSocket *sock, NiceInputMessage *recv_message)
     local_recv_message.from = recv_message->from;
     local_recv_message.length = 0;
 
-    ret = nice_socket_recv_messages (priv->base_socket, &local_recv_message, 1);
+    ret = nice_socket_recv_messages (priv->base_socket, &local_recv_message, 1,
+        NULL);
     if (ret < 0)
         return ret;
 
@@ -174,6 +177,11 @@ socket_recv_message (NiceSocket *sock, NiceInputMessage *recv_message)
 
       if (magic < 0x4000) {
         /* Its STUN */
+        if ((packetlen % 4) != 0) {
+          nice_debug ("%u is an invalid STUN message length; should be padded to a multiple of 4", packetlen);
+          return -1;
+        }
+
         priv->expecting_len = 20 + packetlen;
       } else {
         /* Channel data */
@@ -215,7 +223,8 @@ socket_recv_message (NiceSocket *sock, NiceInputMessage *recv_message)
   local_recv_message.from = recv_message->from;
   local_recv_message.length = 0;
 
-  ret = nice_socket_recv_messages (priv->base_socket, &local_recv_message, 1);
+  ret = nice_socket_recv_messages (priv->base_socket, &local_recv_message, 1,
+      NULL);
   if (ret < 0)
       return ret;
 
@@ -237,7 +246,8 @@ socket_recv_message (NiceSocket *sock, NiceInputMessage *recv_message)
 
 static gint
 socket_recv_messages (NiceSocket *nicesock,
-    NiceInputMessage *recv_messages, guint n_recv_messages)
+    NiceInputMessage *recv_messages, guint n_recv_messages,
+    NiceMessageExtraData *exdata)
 {
   guint i;
   gboolean error = FALSE;

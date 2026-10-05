@@ -83,7 +83,7 @@ nice_component_schedule_io_callback (NiceComponent *component);
 static void
 nice_component_deschedule_io_callback (NiceComponent *component);
 static void
-nice_component_detach_socket (NiceComponent *component, NiceSocket *nicesock);
+nice_component_detach_socket (NiceComponent *component, NiceSocket *nicesock, gboolean *socket_source_freed);
 static void
 nice_component_clear_selected_pair (NiceComponent *component);
 
@@ -193,7 +193,7 @@ nice_component_remove_socket (NiceAgent *agent, NiceComponent *cmp,
     if (candidate->sockptr != nsocket && stream) {
       discovery_prune_socket (agent, candidate->sockptr);
       conn_check_prune_socket (agent, stream, cmp, candidate->sockptr);
-      nice_component_detach_socket (cmp, candidate->sockptr);
+      nice_component_detach_socket (cmp, candidate->sockptr, NULL);
     }
     if (stream)
       agent_remove_local_candidate (agent, stream, (NiceCandidate *) candidate);
@@ -227,22 +227,49 @@ nice_component_remove_socket (NiceAgent *agent, NiceComponent *cmp,
     i = next;
   }
 
-  nice_component_detach_socket (cmp, nsocket);
+  nice_component_detach_socket (cmp, nsocket, NULL);
 }
 
 static gboolean
 on_candidate_refreshes_pruned (NiceAgent *agent, NiceCandidateImpl *candidate)
 {
   NiceComponent *component;
+  gboolean socket_source_freed = FALSE;
 
   if (agent_find_component (agent, candidate->c.stream_id,
       candidate->c.component_id, NULL, &component)) {
-    nice_component_detach_socket (component, candidate->sockptr);
+    nice_component_detach_socket (component, candidate->sockptr, &socket_source_freed);
+  }
+
+  if (candidate->sockptr && !socket_source_freed) {
+    // We typically get here if a candidate was pruned by
+    // `priv_add_local_candidate_pruned()` which means we never called
+    // `nice_component_attach_socket()`. We must free the socket ourselves since
+    // no `SocketSource` took ownership of it.
+    nice_socket_free (candidate->sockptr);
+    candidate->sockptr = NULL;
   }
 
   nice_candidate_free ((NiceCandidate *) candidate);
 
   return G_SOURCE_REMOVE;
+}
+
+void
+nice_component_prune_relay_candidate (NiceAgent *agent,
+    NiceComponent *cmp, NiceCandidateImpl *relay_cand)
+{
+  NiceStream *stream;
+
+  stream = agent_find_stream (agent, cmp->stream_id);
+
+  discovery_prune_socket (agent, relay_cand->sockptr);
+  if (stream) {
+    conn_check_prune_socket (agent, stream, cmp, relay_cand->sockptr);
+  }
+
+  refresh_prune_candidate_async (agent, relay_cand,
+      (NiceTimeoutLockedCallback) on_candidate_refreshes_pruned);
 }
 
 void
@@ -294,14 +321,7 @@ nice_component_clean_turn_servers (NiceAgent *agent, NiceComponent *cmp)
 
   for (i = relay_candidates; i; i = i->next) {
     NiceCandidateImpl * candidate = i->data;
-
-    discovery_prune_socket (agent, candidate->sockptr);
-    if (stream) {
-      conn_check_prune_socket (agent, stream, cmp, candidate->sockptr);
-    }
-
-    refresh_prune_candidate_async (agent, candidate,
-        (NiceTimeoutLockedCallback) on_candidate_refreshes_pruned);
+    nice_component_prune_relay_candidate (agent, cmp, candidate);
   }
 }
 
@@ -378,7 +398,7 @@ nice_component_close (NiceAgent *agent, NiceStream *stream, NiceComponent *cmp)
   while ((data = g_queue_pop_head (&cmp->pending_io_messages)) != NULL)
     io_callback_data_free (data);
 
-  nice_component_deschedule_io_callback (cmp);
+  nice_component_set_io_callback (cmp, NULL, NULL, NULL, NULL, 0, NULL);
 
   g_cancellable_cancel (cmp->stop_cancellable);
 
@@ -391,6 +411,15 @@ nice_component_close (NiceAgent *agent, NiceStream *stream, NiceComponent *cmp)
   g_free (cmp->rfc4571_buffer);
   cmp->recv_buffer = NULL;
   cmp->rfc4571_buffer = NULL;
+
+  nice_message_extra_data_copy (&cmp->exdata, NULL);
+}
+
+void
+nice_component_cancel_turn_server_resolving (NiceComponent* component)
+{
+  if (component->turn_resolving_cancellable)
+    g_cancellable_cancel (component->turn_resolving_cancellable);
 }
 
 void
@@ -711,7 +740,7 @@ nice_component_reattach_all_sockets (NiceComponent *component)
  * If the @socket doesn’t exist in this @component, do nothing.
  */
 static void
-nice_component_detach_socket (NiceComponent *component, NiceSocket *nicesock)
+nice_component_detach_socket (NiceComponent *component, NiceSocket *nicesock, gboolean *socket_source_freed)
 {
   GList *l;
   GSList *s;
@@ -744,6 +773,9 @@ nice_component_detach_socket (NiceComponent *component, NiceSocket *nicesock)
   component->socket_sources_age++;
 
   socket_source_free (socket_source);
+  if (socket_source_freed) {
+    *socket_source_freed = TRUE;
+  }
 }
 
 /*
@@ -808,7 +840,7 @@ nice_component_set_io_context (NiceComponent *component, GMainContext *context)
   g_mutex_unlock (&component->io_mutex);
 }
 
-/* (func, user_data) and (recv_messages, n_recv_messages) are mutually
+/* (func, user_data, notify) and (recv_messages, n_recv_messages) are mutually
  * exclusive. At most one of the two must be specified; if both are NULL, the
  * Component will not receive any data (i.e. reception is paused).
  *
@@ -820,7 +852,7 @@ nice_component_set_io_context (NiceComponent *component, GMainContext *context)
  * unset in that time). */
 void
 nice_component_set_io_callback (NiceComponent *component,
-    NiceAgentRecvFunc func, gpointer user_data,
+    NiceAgentRecvFuncEx func, gpointer user_data, GDestroyNotify notify,
     NiceInputMessage *recv_messages, guint n_recv_messages,
     GError **error)
 {
@@ -830,9 +862,14 @@ nice_component_set_io_callback (NiceComponent *component,
 
   g_mutex_lock (&component->io_mutex);
 
+  if (component->io_user_data_notify) {
+    component->io_user_data_notify (component->io_user_data);
+  }
+
   if (func != NULL) {
     component->io_callback = func;
     component->io_user_data = user_data;
+    component->io_user_data_notify = notify;
     component->recv_messages = NULL;
     component->n_recv_messages = 0;
 
@@ -840,6 +877,7 @@ nice_component_set_io_callback (NiceComponent *component,
   } else {
     component->io_callback = NULL;
     component->io_user_data = NULL;
+    component->io_user_data_notify = NULL;
     component->recv_messages = recv_messages;
     component->n_recv_messages = n_recv_messages;
 
@@ -865,13 +903,15 @@ nice_component_has_io_callback (NiceComponent *component)
 }
 
 IOCallbackData *
-io_callback_data_new (const guint8 *buf, gsize buf_len)
+io_callback_data_new (const guint8 *buf, gsize buf_len,
+    NiceMessageExtraData *exdata)
 {
   IOCallbackData *data;
 
   data = g_slice_new0 (IOCallbackData);
   data->buf = g_memdup (buf, buf_len);
   data->buf_len = buf_len;
+  nice_message_extra_data_copy (&data->exdata, exdata);
   data->offset = 0;
 
   return data;
@@ -881,6 +921,7 @@ void
 io_callback_data_free (IOCallbackData *data)
 {
   g_free (data->buf);
+  nice_message_extra_data_copy (&data->exdata, NULL);
   g_slice_free (IOCallbackData, data);
 }
 
@@ -891,7 +932,7 @@ emit_io_callback_cb (gpointer user_data)
 {
   NiceComponent *component = user_data;
   IOCallbackData *data;
-  NiceAgentRecvFunc io_callback;
+  NiceAgentRecvFuncEx io_callback;
   gpointer io_user_data;
   guint stream_id, component_id;
   NiceAgent *agent;
@@ -935,7 +976,7 @@ emit_io_callback_cb (gpointer user_data)
 
     io_callback (agent, stream_id, component_id,
         data->buf_len - data->offset, (gchar *) data->buf + data->offset,
-        io_user_data);
+        &data->exdata, io_user_data);
 
     /* Check for the user destroying things underneath our feet. */
     if (!agent_find_component (agent, stream_id, component_id,
@@ -965,7 +1006,7 @@ nice_component_emit_io_callback (NiceAgent *agent, NiceComponent *component,
     gsize buf_len)
 {
   guint stream_id, component_id;
-  NiceAgentRecvFunc io_callback;
+  NiceAgentRecvFuncEx io_callback;
   gpointer io_user_data;
 
   g_assert (component != NULL);
@@ -994,8 +1035,8 @@ nice_component_emit_io_callback (NiceAgent *agent, NiceComponent *component,
   if (g_main_context_is_owner (component->ctx)) {
     /* Thread owns the main context, so invoke the callback directly. */
     agent_unlock_and_emit (agent);
-    io_callback (agent, stream_id,
-        component_id, buf_len, (gchar *) component->recv_buffer, io_user_data);
+    io_callback (agent, stream_id, component_id, buf_len,
+        (gchar *) component->recv_buffer, &component->exdata, io_user_data);
     agent_lock (agent);
   } else {
     IOCallbackData *data;
@@ -1004,7 +1045,8 @@ nice_component_emit_io_callback (NiceAgent *agent, NiceComponent *component,
 
     /* Slow path: Current thread doesn’t own the Component’s context at the
      * moment, so schedule the callback in an idle handler. */
-    data = io_callback_data_new (component->recv_buffer, buf_len);
+    data = io_callback_data_new (component->recv_buffer, buf_len,
+        &component->exdata);
     g_queue_push_tail (&component->pending_io_messages,
         data);  /* transfer ownership */
 
@@ -1148,7 +1190,7 @@ nice_component_init (NiceComponent *component)
    * will be updated when nice_agent_attach_recv() or nice_agent_recv_messages()
    * are called. */
   nice_component_set_io_context (component, NULL);
-  nice_component_set_io_callback (component, NULL, NULL, NULL, 0, NULL);
+  nice_component_set_io_callback (component, NULL, NULL, NULL, NULL, 0, NULL);
 
   g_queue_init (&component->queued_tcp_packets);
   g_queue_init (&component->incoming_checks);
@@ -1164,6 +1206,8 @@ nice_component_init (NiceComponent *component)
 
   component->rfc4571_buffer_size = sizeof (guint16) + G_MAXUINT16;
   component->rfc4571_buffer = g_malloc (component->rfc4571_buffer_size);
+
+  component->turn_resolving_cancellable = g_cancellable_new ();
 }
 
 static void
@@ -1271,6 +1315,9 @@ nice_component_finalize (GObject *obj)
 
   g_list_free_full (cmp->valid_candidates,
       (GDestroyNotify) nice_candidate_free);
+
+  g_cancellable_cancel (cmp->turn_resolving_cancellable);
+  g_clear_object (&cmp->turn_resolving_cancellable);
 
   g_clear_object (&cmp->tcp);
   g_clear_object (&cmp->stop_cancellable);
@@ -1533,7 +1580,7 @@ nice_component_input_source_new (NiceAgent *agent, guint stream_id,
   g_source_set_name ((GSource *) component_source, "ComponentSource");
 
   component_source->component_socket_sources_age = 0;
-  component_source->pollable_stream = g_object_ref (pollable_istream);
+  component_source->pollable_stream = G_OBJECT (g_object_ref (pollable_istream));
   g_weak_ref_init (&component_source->agent_ref, agent);
   component_source->stream_id = stream_id;
   component_source->component_id = component_id;
@@ -1557,17 +1604,16 @@ TurnServer *
 turn_server_new (const gchar *server_ip, guint server_port,
     const gchar *username, const gchar *password, NiceRelayType type)
 {
-  TurnServer *turn = g_slice_new (TurnServer);
+  TurnServer *turn = g_slice_new0 (TurnServer);
 
   nice_address_init (&turn->server);
 
   turn->ref_count = 1;
-  if (nice_address_set_from_string (&turn->server, server_ip)) {
+  turn->server_port = server_port;
+  if (nice_address_set_from_string (&turn->server, server_ip))
     nice_address_set_port (&turn->server, server_port);
-  } else {
-    g_slice_free (TurnServer, turn);
-    return NULL;
-  }
+  else
+    turn->server_address = g_strdup (server_ip);
   turn->username = g_strdup (username);
   turn->password = g_strdup (password);
   turn->decoded_username =
@@ -1593,12 +1639,35 @@ turn_server_unref (TurnServer *turn)
   turn->ref_count--;
 
   if (turn->ref_count == 0) {
+    g_free (turn->server_address);
     g_free (turn->username);
     g_free (turn->password);
     g_free (turn->decoded_username);
     g_free (turn->decoded_password);
     g_slice_free (TurnServer, turn);
   }
+}
+
+TurnServer *
+turn_server_copy (TurnServer *turn)
+{
+  TurnServer *copy = g_slice_new0 (TurnServer);
+
+  copy->ref_count = 1;
+  copy->server = turn->server;
+  copy->server_address = g_strdup (turn->server_address);
+  copy->username = g_strdup (turn->username);
+  copy->password = g_strdup (turn->password);
+  copy->decoded_username = g_memdup (turn->decoded_username,
+      turn->decoded_username_len);
+  copy->decoded_password = g_memdup (turn->decoded_password,
+      turn->decoded_password_len);
+  copy->decoded_username_len = turn->decoded_username_len;
+  copy->decoded_password_len = turn->decoded_password_len;
+  copy->type = turn->type;
+  copy->preference = turn->preference;
+
+  return copy;
 }
 
 void
@@ -1690,9 +1759,9 @@ nice_component_get_sockets (NiceComponent *component)
   GPtrArray *array = g_ptr_array_new_with_free_func ((GDestroyNotify) g_object_unref);
   GSList *item;
 
-  for (item = component->local_candidates; item; item = item->next) {
-    NiceCandidateImpl *c = item->data;
-    NiceSocket *nicesock = c->sockptr;
+  for (item = component->socket_sources; item; item = item->next) {
+    SocketSource *source = item->data;
+    NiceSocket *nicesock = source->socket;
 
     if (nicesock->fileno && !g_ptr_array_find (array, nicesock->fileno, NULL))
       g_ptr_array_add (array, g_object_ref (nicesock->fileno));
@@ -1705,4 +1774,22 @@ guint
 nice_component_compute_rfc4571_headroom (NiceComponent *component)
 {
   return component->rfc4571_buffer_offset - component->rfc4571_frame_offset;
+}
+
+gboolean
+nice_component_resolving_turn (NiceComponent *component)
+{
+  GList *item;
+
+  for (item = component->turn_servers; item; item = item->next) {
+    TurnServer *turn = item->data;
+
+    if (turn->resolution_failed)
+      continue;
+
+    if (!nice_address_is_valid (&turn->server))
+      return TRUE;
+  }
+
+  return FALSE;
 }

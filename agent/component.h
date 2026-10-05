@@ -138,10 +138,12 @@ typedef struct {
   guint8 *buf;  /* owned */
   gsize buf_len;
   gsize offset;
+  NiceMessageExtraData exdata;
 } IOCallbackData;
 
 IOCallbackData *
-io_callback_data_new (const guint8 *buf, gsize buf_len);
+io_callback_data_new (const guint8 *buf, gsize buf_len,
+    NiceMessageExtraData *exdata);
 void
 io_callback_data_free (IOCallbackData *data);
 
@@ -188,8 +190,9 @@ struct _NiceComponent {
                                          holding the agent lock; if the agent
                                          lock is to be taken, it must always be
                                          taken before this one */
-  NiceAgentRecvFunc io_callback;    /* function called on io cb */
+  NiceAgentRecvFuncEx io_callback;  /* function called on io cb */
   gpointer io_user_data;            /* data passed to the io function */
+  GDestroyNotify io_user_data_notify; /* called to free io function data */
   GQueue pending_io_messages;       /* queue of messages which have been
                                          received but not passed to the client
                                          in an I/O callback or recv() call yet.
@@ -241,6 +244,7 @@ struct _NiceComponent {
    */
   guint8 *recv_buffer;
   guint recv_buffer_size;
+  NiceMessageExtraData exdata;
 
   /* ICE-TCP frame state */
   guint8 *rfc4571_buffer;
@@ -251,6 +255,9 @@ struct _NiceComponent {
   guint rfc4571_consumed_size;
   NiceAddress rfc4571_remote_addr;
   gboolean rfc4571_wakeup_needed;
+
+  /* TURN resolution */
+  GCancellable *turn_resolving_cancellable;
 };
 
 typedef struct {
@@ -265,6 +272,9 @@ nice_component_new (guint component_id, NiceAgent *agent, NiceStream *stream);
 void
 nice_component_close (NiceAgent *agent, NiceStream *stream,
     NiceComponent *component);
+
+void
+nice_component_cancel_turn_server_resolving (NiceComponent* component);
 
 void
 nice_component_shutdown (NiceComponent *component, gboolean shutdown_read,
@@ -312,7 +322,7 @@ void
 nice_component_set_io_context (NiceComponent *component, GMainContext *context);
 void
 nice_component_set_io_callback (NiceComponent *component,
-    NiceAgentRecvFunc func, gpointer user_data,
+    NiceAgentRecvFuncEx func, gpointer user_data, GDestroyNotify notify,
     NiceInputMessage *recv_messages, guint n_recv_messages,
     GError **error);
 void
@@ -321,12 +331,18 @@ nice_component_emit_io_callback (NiceAgent *agent, NiceComponent *component,
 gboolean
 nice_component_has_io_callback (NiceComponent *component);
 void
+nice_component_prune_relay_candidate (NiceAgent *agent,
+    NiceComponent *cmp, NiceCandidateImpl *relay_cand);
+void
 nice_component_clean_turn_servers (NiceAgent *agent, NiceComponent *component);
 
 
 TurnServer *
 turn_server_new (const gchar *server_ip, guint server_port,
     const gchar *username, const gchar *password, NiceRelayType type);
+
+TurnServer *
+turn_server_copy (TurnServer *turn);
 
 TurnServer *
 turn_server_ref (TurnServer *turn);
@@ -347,6 +363,10 @@ nice_component_get_sockets (NiceComponent *component);
 
 guint
 nice_component_compute_rfc4571_headroom (NiceComponent *component);
+
+gboolean
+nice_component_resolving_turn (NiceComponent *component);
+
 
 G_END_DECLS
 

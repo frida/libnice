@@ -40,12 +40,24 @@ if cc.has_header('arpa/inet.h')
   ]
 endif
 
+if host_machine.system() == 'linux'
+  nice_tests += [
+    'test-slow-resolving',
+  ]
+  if gio_dep.version().version_compare('>= 2.88.0')
+    nice_tests += [
+     'test-exdata',
+    ]
+  endif
+endif
+
 foreach tname : nice_tests
   if tname.startswith('test-io-stream') or tname.startswith('test-send-recv') or tname == 'test-bytestream-tcp'
     extra_src = ['test-io-stream-common.c']
   else
     extra_src = []
   endif
+  extra_src += ['test-common.c']
   exe = executable('nice-@0@'.format(tname),
     '@0@.c'.format(tname), extra_src,
     c_args: '-DG_LOG_DOMAIN="libnice-tests"',
@@ -54,7 +66,15 @@ foreach tname : nice_tests
     link_with: [libagent, libstun, libsocket, librandom],
     install: false)
   set_variable(tname.underscorify(), exe)
-  test(tname, exe)
+  if tname == 'test-slow-resolving'
+    dl_dep = cc.find_library('dl')
+    preload_lib = shared_library('slow-resolver', 'slow-resolver.c', dependencies: [dl_dep])
+    preload_env = environment()
+    preload_env.append('LD_PRELOAD', preload_lib.full_path())
+    test(tname, exe, env: preload_env)
+  else
+    test(tname, exe)
+  endif
 
   if tname == 'test-fullmode'
     wrapper_exe = executable ('nice-test-fullmode-with-stun',
@@ -68,19 +88,35 @@ foreach tname : nice_tests
   endif
 endforeach
 
-if gst_dep.found()
-  gst_check = dependency('gstreamer-check-1.0', required: get_option('gstreamer'),
-                         fallback : ['gstreamer', 'gst_check_dep'])
+# FIXME: The GStreamer test needs nicesrc and nicesink plugins to run. libnice might be part of the GStreamer build.
+# In this case, in static mode (gstreamer-full), the test should be built after gstreamer-full to initialize
+# properly the plugins (gstreamer and libnice ones) with gst_init_static_plugins.
+# That's the reason the test is now disabled in static mode.
+if gst_dep.found() and not static_build
+  gst_check = dependency('gstreamer-check-1.0', required: get_option('gstreamer'))
   if gst_check.found()
+    test_defines = [
+      '-DG_LOG_DOMAIN="libnice-tests"',
+      '-UG_DISABLE_ASSERT',
+      '-UG_DISABLE_CAST_CHECKS',
+    ]
+    gst_env = environment()
+    dl_dep = cc.find_library('dl')
+    instrument_send_lib = shared_library('instrument-send',
+      'instrument-send.c',
+      c_args: '-DG_LOG_DOMAIN="libnice-instrument-send"',
+      dependencies: [dl_dep, gio_deps],
+    )
+    gst_env.append('LD_PRELOAD', instrument_send_lib.full_path())
     exe = executable('nice-test-gstreamer',
       'test-gstreamer.c', extra_src,
-      c_args: '-DG_LOG_DOMAIN="libnice-tests"',
+      c_args: test_defines,
       include_directories: nice_incs,
       dependencies: [nice_deps, gst_check, libm],
-      link_with: libnice,
+      link_with: [libnice, instrument_send_lib],
       install: false)
-    gst_env = environment()
     gst_env.append('GST_PLUGIN_PATH_1_0', join_paths(meson.current_build_dir(), '..', 'gst'))
+    gst_env.append('CK_DEFAULT_TIMEOUT', '30')
     test('test-gstreamer', exe, env: gst_env)
   endif
 endif
@@ -91,6 +127,6 @@ if find_program('sh', required : false).found() and find_program('dd', required 
 endif
 
 debugenv = environment()
-debugenv.set('G_MESSAGES_DEBUG', 'all')
+#debugenv.set('G_MESSAGES_DEBUG', 'libnice')
 debugenv.set('NICE_DEBUG', 'all')
 add_test_setup('debug', env: debugenv)

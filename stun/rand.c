@@ -52,15 +52,6 @@ void nice_RAND_nonce (uint8_t *dst, int len)
   CryptReleaseContext (prov, 0);
 }
 
-#elif defined(USE_APPLE_CRYPTO)
-
-#include <stdlib.h>
-
-void nice_RAND_nonce (uint8_t *dst, int len)
-{
-  arc4random_buf (dst, len);
-}
-
 #elif defined(HAVE_OPENSSL)
 
 #include <openssl/rand.h>

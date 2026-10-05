@@ -61,37 +61,42 @@ read_stream_cb (GObject *pollable_stream, gpointer _user_data)
 {
   TestIOStreamThreadData *data = _user_data;
   ThreadData *user_data = data->user_data;
-  gchar expected_data[MESSAGE_SIZE];
-  GError *error = NULL;
-  guint8 buf[MESSAGE_SIZE];
-  gssize len;
 
-  /* Try to receive some data. */
-  len = g_pollable_input_stream_read_nonblocking (
-      G_POLLABLE_INPUT_STREAM (pollable_stream), buf,
-      sizeof (buf) - user_data->recv_offset, NULL, &error);
+  for (;;) {
+    guint8 expected_data[MESSAGE_SIZE];
+    GError *error = NULL;
+    guint8 buf[MESSAGE_SIZE];
+    gssize len;
 
-  if (len == -1) {
-    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK);
-    g_error_free (error);
-    return TRUE;
+    /* Try to receive some data. */
+    len = g_pollable_input_stream_read_nonblocking (
+						    G_POLLABLE_INPUT_STREAM (pollable_stream), buf,
+						    sizeof (buf) - user_data->recv_offset, NULL, &error);
+
+    if (len == -1) {
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK);
+      g_error_free (error);
+      return TRUE;
+    }
+
+    if (len == 0)
+      return TRUE;
+
+    memset (expected_data, user_data->recv_count + '1', len);
+    g_assert_cmpmem (buf, len, expected_data, len);
+
+    user_data->recv_offset += len;
+    if (user_data->recv_offset == MESSAGE_SIZE) {
+      user_data->recv_offset = 0;
+      user_data->recv_count++;
+    }
+    g_assert_cmpuint(user_data->recv_offset, <, MESSAGE_SIZE);
+
+    if (user_data->recv_count == 10) {
+      g_main_loop_quit (user_data->read_loop);
+      return FALSE;
+    }
   }
-
-  memset (expected_data, user_data->recv_count + '1', len);
-  g_assert_cmpmem (buf, len, expected_data, len);
-
-  user_data->recv_offset += len;
-  if (user_data->recv_offset == MESSAGE_SIZE) {
-    user_data->recv_offset = 0;
-    user_data->recv_count++;
-  }
-
-  if (user_data->recv_count == 10) {
-    g_main_loop_quit (user_data->read_loop);
-    return FALSE;
-  }
-
-  return TRUE;
 }
 
 static void
@@ -127,14 +132,12 @@ read_thread_cb (GInputStream *input_stream, TestIOStreamThreadData *data)
       user_data->other_recv_count, &user_data->send_count, 10);
 }
 
-static void
-write_thread_cb (GOutputStream *output_stream, TestIOStreamThreadData *data)
+static gboolean
+write_now (GOutputStream *output_stream, ThreadData *user_data)
 {
-  ThreadData *user_data = data->user_data;
   guint8 buf[MESSAGE_SIZE];
 
-  for (user_data->send_count = 0;
-       user_data->send_count < 10;
+  for (;user_data->send_count < 10;
        user_data->send_count++) {
     GError *error = NULL;
 
@@ -143,8 +146,52 @@ write_thread_cb (GOutputStream *output_stream, TestIOStreamThreadData *data)
     g_pollable_output_stream_write_nonblocking (
         G_POLLABLE_OUTPUT_STREAM (output_stream), buf, sizeof (buf), NULL,
         &error);
+
+    if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK)) {
+      g_clear_error(&error);
+      return FALSE;
+    }
     g_assert_no_error (error);
   }
+
+  return TRUE;
+}
+
+static gboolean
+write_stream_cb (GOutputStream *output_stream, TestIOStreamThreadData *data)
+{
+  ThreadData *user_data = data->user_data;
+
+  return write_now (output_stream, user_data);
+}
+
+static void
+write_thread_cb (GOutputStream *output_stream, TestIOStreamThreadData *data)
+{
+  ThreadData *user_data = data->user_data;
+  GMainContext *main_context;
+  GSource *stream_source;
+
+  if (write_now (output_stream, user_data))
+    return;
+
+  main_context = g_main_context_new();
+  g_main_context_push_thread_default (main_context);
+
+  stream_source =
+      g_pollable_output_stream_create_source (
+          G_POLLABLE_OUTPUT_STREAM (output_stream), NULL);
+
+  g_source_set_callback (stream_source, G_SOURCE_FUNC (write_stream_cb),
+      data, NULL);
+  g_source_attach (stream_source, main_context);
+  g_source_unref (stream_source);
+
+  while (user_data->send_count < 10)
+    g_main_context_iteration (main_context, TRUE);
+
+  g_main_context_pop_thread_default (main_context);
+  g_main_context_unref (main_context);
 }
 
 int main (void)

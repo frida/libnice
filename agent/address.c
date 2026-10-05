@@ -261,8 +261,8 @@ nice_address_to_string (const NiceAddress *addr, gchar *dst)
   }
 }
 
-NICEAPI_EXPORT char *
-nice_address_to_string_dup (const NiceAddress *addr)
+NICEAPI_EXPORT gchar *
+nice_address_dup_string (const NiceAddress *addr)
 {
   char dst[MAX(INET_ADDRSTRLEN, INET6_ADDRSTRLEN)] = "";
 

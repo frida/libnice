@@ -223,6 +223,15 @@ typedef struct {
   gint n_buffers;
 } NiceOutputMessage;
 
+/**
+ * NiceMessageExtraData:
+ *
+ * An opaque structure that holds extra information about received data buffers.
+ * To access the extra data, use nice_message_extra_data_get_*() functions.
+ *
+ * Since: 0.1.24
+ */
+typedef struct _NiceMessageExtraData NiceMessageExtraData;
 
 #define NICE_TYPE_AGENT nice_agent_get_type()
 
@@ -412,6 +421,9 @@ typedef enum
  * proposed here: https://tools.ietf.org/html/draft-thatcher-ice-renomination-00
  * @NICE_AGENT_OPTION_CONSENT_FRESHNESS: Enable RFC 7675 consent freshness support. (Since: 0.1.19)
  * @NICE_AGENT_OPTION_BYTESTREAM_TCP: Use bytestream mode for reliable TCP connections. (Since: 0.1.20)
+ * @NICE_AGENT_OPTION_CLOSE_FORCED: When removing TURN port allocations on TURN server,
+ * don't do retransmissions and don't wait for a response. (Since: 0.1.23)
+ * @NICE_AGENT_OPTION_RECV_TOS: Enables receiving IP_TOS/IPV6_TCLASS packet header fields. (Since: 0.1.23)
  *
  * These are options that can be passed to nice_agent_new_full(). They set
  * various properties on the agent. Not including them sets the property to
@@ -428,6 +440,8 @@ typedef enum {
   NICE_AGENT_OPTION_SUPPORT_RENOMINATION = 1 << 4,
   NICE_AGENT_OPTION_CONSENT_FRESHNESS = 1 << 5,
   NICE_AGENT_OPTION_BYTESTREAM_TCP = 1 << 6,
+  NICE_AGENT_OPTION_CLOSE_FORCED = 1 << 7,
+  NICE_AGENT_OPTION_RECV_TOS = 1 << 8,
 } NiceAgentOption;
 
 /**
@@ -447,6 +461,24 @@ typedef void (*NiceAgentRecvFunc) (
   NiceAgent *agent, guint stream_id, guint component_id, guint len,
   gchar *buf, gpointer user_data);
 
+/**
+ * NiceAgentRecvFuncEx:
+ * @agent: The #NiceAgent Object
+ * @stream_id: The id of the stream
+ * @component_id: The id of the component of the stream which received the data
+ * @len: The length of the data
+ * @buf: The buffer containing the data received
+ * @exdata: Extra information about the received data buffer
+ * @user_data: The user data set in nice_agent_attach_recv()
+ *
+ * A variant of #NiceAgentRecvFunc that provides a #NiceMessageExtraData
+ * structure with additional information about the received data buffer.
+ *
+ * Since: 0.1.24
+ */
+typedef void (*NiceAgentRecvFuncEx) (
+  NiceAgent *agent, guint stream_id, guint component_id, guint len,
+  gchar *buf, NiceMessageExtraData *exdata, gpointer user_data);
 
 /**
  * nice_agent_new:
@@ -514,8 +546,7 @@ nice_agent_new_full (GMainContext *ctx,
  * </para>
  *
  * See also: nice_agent_gather_candidates()
- * Returns: %TRUE on success, %FALSE when the local address doesn't
- * exists.
+ * Returns: %TRUE on success, %FALSE on fatal (memory allocation) errors
  */
 gboolean
 nice_agent_add_local_address (NiceAgent *agent, NiceAddress *addr);
@@ -583,7 +614,7 @@ nice_agent_set_port_range (
  * @agent: The #NiceAgent Object
  * @stream_id: The ID of the stream
  * @component_id: The ID of the component
- * @server_ip: The IP address of the TURN server
+ * @server_ip: The address of the TURN server
  * @server_port: The port of the TURN server
  * @username: The TURN username to use for the allocate
  * @password: The TURN password to use for the allocate
@@ -998,6 +1029,39 @@ nice_agent_attach_recv (
   GMainContext *ctx,
   NiceAgentRecvFunc func,
   gpointer data);
+
+/**
+ * nice_agent_attach_recv_ex:
+ * @agent: The #NiceAgent Object
+ * @stream_id: The ID of stream
+ * @component_id: The ID of the component
+ * @ctx: The Glib Mainloop Context to use for listening on the component
+ * @func: The callback function to be called when data is received on
+ * the stream's component (will not be called for STUN messages that
+ * should be handled by #NiceAgent itself)
+ * @data: user data associated with the callback
+ * @notify: A function to free @data 
+ *
+ * A version of #nice_agent_attach_recv that takes #NiceAgentRecvFuncEx as the
+ * callback function, which allows retrieving #NiceMessageExtraData structure
+ * containing additional info about the received data buffer.
+ *
+ * @data becomes owned by libnice, which will call @notify to free the data when
+ * they are no longer needed.
+ *
+ * Returns: %TRUE on success, %FALSE if the stream or component IDs are invalid.
+ *
+ * Since: 0.1.24
+ */
+gboolean
+nice_agent_attach_recv_ex (
+  NiceAgent *agent,
+  guint stream_id,
+  guint component_id,
+  GMainContext *ctx,
+  NiceAgentRecvFuncEx func,
+  gpointer data,
+  GDestroyNotify notify);
 
 /**
  * nice_agent_recv:
@@ -1746,6 +1810,24 @@ nice_agent_close_async (NiceAgent *agent, GAsyncReadyCallback callback,
  */
 GPtrArray *
 nice_agent_get_sockets (NiceAgent *agent, guint stream_id, guint component_id);
+
+/**
+ * nice_message_extra_data_get_tos:
+ * @exdata: A #NiceMessageExtraData structure
+ *
+ * Retrieves #GIPTosMessage or #GIPv6TclassMessage object containing traffic
+ * control data from IPv4 or IPv6 header of the buffer associated with @exdata.
+ * For more information about traffic control in IP headers see RFC2474 and
+ * RFC3168.
+ *
+ * Returns: (element-type GSocketControlMessage) (transfer full): The traffic
+ * control data held by @exdata or NULL when such data were not provided for
+ * the associated buffer. Free with g_object_unref() when done.
+ *
+ * Since: 0.1.24
+ */
+GSocketControlMessage *
+nice_message_extra_data_get_tos (NiceMessageExtraData *exdata);
 
 G_END_DECLS
 

@@ -225,6 +225,7 @@ stun_trans_init (StunTransport *tr, int fd,
     const struct sockaddr *srv, socklen_t srvlen)
 {
   assert (fd != -1);
+  assert (srv != NULL);
 
   if ((size_t) srvlen > sizeof (tr->dst))
     return STUN_USAGE_TRANS_RETURN_INVALID_ADDRESS;
@@ -465,8 +466,9 @@ stun_trans_poll (StunTransport *tr, unsigned int delay)
 
 
 /** Blocking mode STUN binding discovery */
-StunUsageBindReturn stun_usage_bind_run (const struct sockaddr *srv,
-    socklen_t srvlen, struct sockaddr_storage *addr, socklen_t *addrlen)
+StunUsageBindReturn stun_usage_bind_run_compat (const struct sockaddr *srv,
+    socklen_t srvlen, struct sockaddr_storage *addr, socklen_t *addrlen,
+    StunCompatibility compat)
 {
   StunTimer timer;
   StunTransport trans;
@@ -486,7 +488,7 @@ StunUsageBindReturn stun_usage_bind_run (const struct sockaddr *srv,
   trans.fd = -1;
 
   stun_agent_init (&agent, STUN_ALL_KNOWN_ATTRIBUTES,
-      STUN_COMPATIBILITY_RFC3489, 0);
+      compat, 0);
 
   len = stun_usage_bind_create (&agent, &req, req_buf, sizeof(req_buf));
 
@@ -591,4 +593,11 @@ done:
     stun_trans_deinit (&trans);
 
   return bind_ret;
+}
+
+StunUsageBindReturn stun_usage_bind_run (const struct sockaddr *srv,
+    socklen_t srvlen, struct sockaddr_storage *addr, socklen_t *addrlen)
+{
+  return stun_usage_bind_run_compat(srv, srvlen,
+      addr, addrlen, STUN_COMPATIBILITY_RFC3489);
 }

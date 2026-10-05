@@ -57,6 +57,7 @@
 #include "agent-priv.h"
 #include "conncheck.h"
 #include "discovery.h"
+#include "socket-priv.h"
 #include "stun/stun5389.h"
 #include "stun/usages/ice.h"
 #include "stun/usages/bind.h"
@@ -166,35 +167,6 @@ priv_ice_return_to_string (StunUsageIceReturn ice_return)
   }
 }
 
-static const gchar *
-priv_socket_type_to_string (NiceSocketType type)
-{
-  switch (type) {
-    case NICE_SOCKET_TYPE_UDP_BSD:
-      return "udp";
-    case NICE_SOCKET_TYPE_TCP_BSD:
-      return "tcp";
-    case NICE_SOCKET_TYPE_PSEUDOSSL:
-      return "ssl";
-    case NICE_SOCKET_TYPE_HTTP:
-      return "http";
-    case NICE_SOCKET_TYPE_SOCKS5:
-      return "socks";
-    case NICE_SOCKET_TYPE_UDP_TURN:
-      return "udp-turn";
-    case NICE_SOCKET_TYPE_UDP_TURN_OVER_TCP:
-      return "tcp-turn";
-    case NICE_SOCKET_TYPE_TCP_ACTIVE:
-      return "tcp-act";
-    case NICE_SOCKET_TYPE_TCP_PASSIVE:
-      return "tcp-pass";
-    case NICE_SOCKET_TYPE_TCP_SO:
-      return "tcp-so";
-    default:
-      g_assert_not_reached ();
-  }
-}
-
 /*
  * Dump the component list of incoming checks
  */
@@ -214,7 +186,7 @@ print_component_incoming_checks (NiceAgent *agent, NiceStream *stream,
     nice_debug ("Agent %p : *** sc=%d/%d : icheck %p : "
       "sock %s [%s]:%u > [%s]:%u, use_cand %u",
       agent, stream->id, component->id, icheck,
-      priv_socket_type_to_string (icheck->local_socket->type),
+      nice_socket_type_to_string (icheck->local_socket->type),
       tmpbuf1, nice_address_get_port (&icheck->local_socket->addr),
       tmpbuf2, nice_address_get_port (&icheck->from),
       icheck->use_candidate);
@@ -266,7 +238,7 @@ priv_print_conn_check_lists (NiceAgent *agent, const gchar *where, const gchar *
               pair->foundation,
               nice_candidate_type_to_string (pair->local->type),
               nice_candidate_type_to_string (pair->remote->type),
-              priv_socket_type_to_string (pair->sockptr->type),
+              nice_socket_type_to_string (pair->sockptr->type),
               nice_candidate_transport_to_string (pair->local->transport),
               local_addr, nice_address_get_port (&pair->local->addr),
               nice_candidate_transport_to_string (pair->remote->transport),
@@ -1311,10 +1283,10 @@ static guint32 peer_reflexive_candidate_priority (NiceAgent *agent,
     priority = nice_candidate_msn_priority (candidate_priority);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     priority = nice_candidate_ms_ice_priority (candidate_priority,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   } else {
     priority = nice_candidate_ice_priority (candidate_priority,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   }
   nice_candidate_free (candidate_priority);
 
@@ -2348,9 +2320,7 @@ static CandidateCheckPair *priv_add_new_check_pair (NiceAgent *agent,
   priority = agent_candidate_pair_priority (agent, (NiceCandidate *) local,
       (NiceCandidate *) remote);
 
-  /* if renomination is supported, we still need to create low priority pair
-   * because it would possibly be nominated in future */
-  if (!agent->support_renomination && component->selected_pair.priority &&
+  if (component->selected_pair.priority &&
       priority < component->selected_pair.priority) {
     gchar prio1[NICE_CANDIDATE_PAIR_PRIORITY_MAX_SIZE];
     gchar prio2[NICE_CANDIDATE_PAIR_PRIORITY_MAX_SIZE];
@@ -2636,7 +2606,7 @@ void conn_check_free (NiceAgent *agent)
 
 /*
  * Prunes the list of connectivity checks for items related
- * to stream 'stream_id'. 
+ * to stream 'stream_id'.
  *
  * @return TRUE on success, FALSE on a fatal error
  */
@@ -3897,6 +3867,8 @@ priv_add_new_turn_refresh (NiceAgent *agent, CandidateDiscovery *cdisco,
     NiceCandidateImpl *relay_cand, guint lifetime)
 {
   CandidateRefresh *cand;
+  NiceStream *stream = NULL;
+  NiceComponent *component = NULL;
 
   if (cdisco->turn->type == NICE_RELAY_TYPE_TURN_TLS &&
       (agent->compatibility == NICE_COMPATIBILITY_OC2007 ||
@@ -3922,8 +3894,12 @@ priv_add_new_turn_refresh (NiceAgent *agent, CandidateDiscovery *cdisco,
     cand->stun_resp_msg.key = NULL;
   }
 
+  /* Although it may seem unintuitive to unconditionally add cand to
+   * refresh_list, all code paths below actually do the right thing no matter if
+   * cand is going to be used or immediately discarded. */
+  agent->refresh_list = g_slist_append (agent->refresh_list, cand);
+
   if (lifetime > 0) {
-    agent->refresh_list = g_slist_append (agent->refresh_list, cand);
     nice_debug ("Agent %p : Adding new refresh candidate %p with timeout %d",
         agent, cand, priv_calc_turn_timeout (lifetime));
     /* step: also start the refresh timer */
@@ -3935,14 +3911,18 @@ priv_add_new_turn_refresh (NiceAgent *agent, CandidateDiscovery *cdisco,
 
     nice_debug ("timer source is : %p", cand->timer_source);
   } else {
-    agent->pruning_refreshes = g_slist_append (agent->pruning_refreshes, cand);
-    nice_debug ("Agent %p : Sending request to remove TURN allocation "
-        "for refresh %p", agent, cand);
-    cand->disposing = TRUE;
-    priv_turn_allocate_refresh_tick_unlocked (agent, cand);
-    if (relay_cand->sockptr)
-      nice_socket_free (relay_cand->sockptr);
-    nice_candidate_free ((NiceCandidate *)relay_cand);
+    stream = agent_find_stream (agent, cdisco->stream_id);
+    if (stream) {
+      component = nice_stream_find_component_by_id (stream, cdisco->component_id);
+      if (component) {
+        /* remove turn allocation */
+        nice_component_prune_relay_candidate (agent, component, relay_cand);
+      }
+    }
+    if (!stream || !component) {
+      refresh_free (agent, cand);
+      nice_candidate_free ((NiceCandidate *)relay_cand);
+    }
   }
 
   return;
@@ -4501,25 +4481,13 @@ static gboolean conn_check_handle_renomination (NiceAgent *agent, NiceStream *st
      * selected pair's priority so this pair gets SELECTED!
      */
     if (component->selected_pair.priority &&
-        component->selected_pair.remote && component->selected_pair.local &&
-        /* local OR remote candidate differ from current selected pair */
-        (component->selected_pair.remote != (NiceCandidateImpl *) remote_candidate ||
-        component->selected_pair.local != (NiceCandidateImpl *) local_candidate)) {
+        component->selected_pair.remote && component->selected_pair.remote != (NiceCandidateImpl *) remote_candidate &&
+        component->selected_pair.local && component->selected_pair.local != (NiceCandidateImpl *) local_candidate) {
       for (lst = stream->conncheck_list; lst; lst = lst->next) {
         CandidateCheckPair *pair = lst->data;
         if (pair->local == local_candidate && pair->remote == remote_candidate) {
           if (pair->valid) {
             pair->priority = component->selected_pair.priority + 1;
-            if (nice_debug_is_enabled ()) {
-              gchar sel_remote_str[INET6_ADDRSTRLEN];
-              gchar sel_local_str[INET6_ADDRSTRLEN];
-              nice_address_to_string(&component->selected_pair.remote->c.addr, sel_remote_str);
-              nice_address_to_string(&component->selected_pair.local->c.addr, sel_local_str);
-              nice_debug ("Agent %p : pair %p: setting priority to %lu to replace currently selected pair [%s]:%u -> [%s]:%u",
-                  agent, pair, pair->priority,
-                  sel_remote_str, nice_address_get_port (&component->selected_pair.remote->c.addr),
-                  sel_local_str, nice_address_get_port (&component->selected_pair.local->c.addr));
-            }
           }
           break;
         }

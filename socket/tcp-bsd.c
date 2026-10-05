@@ -76,11 +76,10 @@ typedef struct {
   NiceSocket *passive_parent;
 } TcpPriv;
 
-#define MAX_QUEUE_LENGTH 20
-
 static void socket_close (NiceSocket *sock);
 static gint socket_recv_messages (NiceSocket *sock,
-    NiceInputMessage *recv_messages, guint n_recv_messages);
+    NiceInputMessage *recv_messages, guint n_recv_messages,
+    NiceMessageExtraData *exdata);
 static gint socket_send_messages (NiceSocket *sock, const NiceAddress *to,
     const NiceOutputMessage *messages, guint n_messages);
 static gint socket_send_messages_reliable (NiceSocket *sock,
@@ -246,7 +245,8 @@ socket_close (NiceSocket *sock)
 
 static gint
 socket_recv_messages (NiceSocket *sock,
-    NiceInputMessage *recv_messages, guint n_recv_messages)
+    NiceInputMessage *recv_messages, guint n_recv_messages,
+    NiceMessageExtraData *exdata)
 {
   TcpPriv *priv = sock->priv;
   guint i;
@@ -312,6 +312,8 @@ socket_send_message (NiceSocket *sock,
   if (priv->error)
     return -1;
 
+  g_mutex_lock(&mutex);
+
   message_len = output_message_get_size (message);
 
   /* First try to send the data, don't send it later if it can be sent now
@@ -352,6 +354,8 @@ socket_send_message (NiceSocket *sock,
       ret = 0;
     }
   }
+
+  g_mutex_unlock(&mutex);
 
   return ret;
 }

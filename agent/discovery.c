@@ -266,12 +266,27 @@ static gboolean refresh_remove_async (NiceAgent *agent, gpointer pointer)
     agent_socket_send (cand->nicesock, &cand->server, buffer_len,
         (gchar *)cand->stun_buffer);
 
-    stun_timer_start (&cand->timer, agent->stun_initial_timeout,
-        agent->stun_max_retransmissions);
+    if (agent->close_forced) {
+      StunTransactionId id;
 
-    agent_timeout_add_with_context (agent, &cand->tick_source,
-        "TURN deallocate retransmission", stun_timer_remainder (&cand->timer),
-        (NiceTimeoutLockedCallback) on_refresh_remove_timeout, cand);
+      /* send the refresh twice if we won't do retransmissions */
+      if (!nice_socket_is_reliable (cand->nicesock)) {
+        agent_socket_send (cand->nicesock, &cand->server,
+            buffer_len, (gchar *)cand->stun_buffer);
+      }
+
+      /* then forget the transaction and free up resources immediately */
+      stun_message_id (&cand->stun_message, id);
+      stun_agent_forget_transaction (&cand->stun_agent, id);
+      refresh_free (agent, cand);
+    } else {
+      stun_timer_start (&cand->timer, agent->stun_initial_timeout,
+          agent->stun_max_retransmissions);
+
+      agent_timeout_add_with_context (agent, &cand->tick_source,
+          "TURN deallocate retransmission", stun_timer_remainder (&cand->timer),
+          (NiceTimeoutLockedCallback) on_refresh_remove_timeout, cand);
+    }
   }
   return G_SOURCE_REMOVE;
 }
@@ -326,12 +341,6 @@ static void refresh_prune_async (NiceAgent *agent, GSList *refreshes,
      * schedule client's callback function. */
     on_refresh_removed (data);
   }
-}
-
-void refresh_prune_agent_async (NiceAgent *agent,
-    NiceTimeoutLockedCallback function, gpointer user_data)
-{
-  refresh_prune_async (agent, agent->refresh_list, function, user_data);
 }
 
 /*
@@ -770,6 +779,26 @@ HostCandidateResult discovery_add_local_host_candidate (
   if (!agent_find_component (agent, stream_id, component_id, &stream, &component))
     return res;
 
+  /* note: candidate username and password are left NULL as stream
+     level ufrag/password are used */
+  if (transport == NICE_CANDIDATE_TRANSPORT_UDP) {
+    nicesock = nice_udp_bsd_socket_new (agent->main_context, address, agent->recv_tos, &error);
+  } else if (transport == NICE_CANDIDATE_TRANSPORT_TCP_ACTIVE) {
+    nicesock = nice_tcp_active_socket_new (agent->main_context, address);
+  } else if (transport == NICE_CANDIDATE_TRANSPORT_TCP_PASSIVE) {
+    nicesock = nice_tcp_passive_socket_new (agent->main_context, address, &error);
+  } else {
+    /* TODO: Add TCP-SO */
+  }
+  if (!nicesock) {
+    if (error && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_ADDRESS_IN_USE))
+      res = HOST_CANDIDATE_DUPLICATE_PORT;
+    else
+      res = HOST_CANDIDATE_CANT_CREATE_SOCKET;
+    g_clear_error (&error);
+    return res;
+  }
+
   candidate = nice_candidate_new (NICE_CANDIDATE_TYPE_HOST);
   c = (NiceCandidateImpl *) candidate;
   candidate->transport = transport;
@@ -784,34 +813,14 @@ HostCandidateResult discovery_add_local_host_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   } else {
     candidate->priority = nice_candidate_ice_priority (candidate,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   }
 
   priv_generate_candidate_credentials (agent, candidate);
   priv_assign_foundation (agent, candidate);
-
-  /* note: candidate username and password are left NULL as stream
-     level ufrag/password are used */
-  if (transport == NICE_CANDIDATE_TRANSPORT_UDP) {
-    nicesock = nice_udp_bsd_socket_new (address, &error);
-  } else if (transport == NICE_CANDIDATE_TRANSPORT_TCP_ACTIVE) {
-    nicesock = nice_tcp_active_socket_new (agent->main_context, address);
-  } else if (transport == NICE_CANDIDATE_TRANSPORT_TCP_PASSIVE) {
-    nicesock = nice_tcp_passive_socket_new (agent->main_context, address, &error);
-  } else {
-    /* TODO: Add TCP-SO */
-  }
-  if (!nicesock) {
-    if (error && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_ADDRESS_IN_USE))
-      res = HOST_CANDIDATE_DUPLICATE_PORT;
-    else
-      res = HOST_CANDIDATE_CANT_CREATE_SOCKET;
-    g_clear_error (&error);
-    goto errors;
-  }
 
   c->sockptr = nicesock;
   candidate->addr = nicesock->addr;
@@ -886,10 +895,10 @@ discovery_add_server_reflexive_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, nat_assisted, agent->local_addresses);
+        agent->reliable, nat_assisted);
   } else {
     candidate->priority =  nice_candidate_ice_priority (candidate,
-        agent->reliable, nat_assisted, agent->local_addresses);
+        agent->reliable, nat_assisted);
   }
 
   if (server_address != NULL)
@@ -1009,10 +1018,10 @@ discovery_add_relay_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   } else {
     candidate->priority =  nice_candidate_ice_priority (candidate,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   }
 
   priv_generate_candidate_credentials (agent, candidate);
@@ -1191,10 +1200,10 @@ NiceCandidate *discovery_learn_remote_peer_reflexive_candidate (
     candidate->priority = nice_candidate_msn_priority (candidate);
   } else if (agent->compatibility == NICE_COMPATIBILITY_OC2007R2) {
     candidate->priority =  nice_candidate_ms_ice_priority (candidate,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   } else {
     candidate->priority = nice_candidate_ice_priority (candidate,
-        agent->reliable, FALSE, agent->local_addresses);
+        agent->reliable, FALSE);
   }
 
   priv_assign_remote_foundation (agent, candidate);
@@ -1276,8 +1285,8 @@ static gboolean priv_discovery_tick_unlocked (NiceAgent *agent)
       if (nice_debug_is_enabled ()) {
         gchar tmpbuf[INET6_ADDRSTRLEN];
         nice_address_to_string (&cand->server, tmpbuf);
-        nice_debug ("Agent %p : discovery - scheduling cand type %u addr %s.",
-            agent, cand->type, tmpbuf);
+        nice_debug ("Agent %p : discovery - scheduling cand %p type %s addr %s:%u.",
+            agent, cand, nice_candidate_type_to_string (cand->type), tmpbuf, nice_address_get_port (&cand->server));
       }
       if (nice_address_is_valid (&cand->server) &&
           (cand->type == NICE_CANDIDATE_TYPE_SERVER_REFLEXIVE ||
@@ -1328,8 +1337,8 @@ static gboolean priv_discovery_tick_unlocked (NiceAgent *agent)
           ++need_pacing;
         } else {
           /* case: error in starting discovery, start the next discovery */
-          nice_debug ("Agent %p : Error starting discovery, skipping the item.",
-              agent);
+          nice_debug ("Agent %p : Error starting discovery, skipping the item %p.",
+              agent, cand);
           cand->done = TRUE;
           cand->stun_message.buffer = NULL;
           cand->stun_message.buffer_len = 0;

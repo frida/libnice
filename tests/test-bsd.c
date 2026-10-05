@@ -50,7 +50,7 @@ socket_recv (NiceSocket *sock, NiceAddress *addr, gsize buf_len, gchar *buf)
   NiceInputMessage local_message = { &local_buf, 1, addr, 0 };
   gint ret;
 
-  ret = nice_socket_recv_messages (sock, &local_message, 1);
+  ret = nice_socket_recv_messages (sock, &local_message, 1, NULL);
   if (ret <= 0)
     return ret;
 
@@ -63,7 +63,7 @@ test_socket_initial_properties (void)
   NiceSocket *sock;
   GError *error = NULL;
 
-  sock = nice_udp_bsd_socket_new (NULL, &error);
+  sock = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (sock != NULL);
 
@@ -82,7 +82,7 @@ test_socket_address_properties (void)
   NiceAddress tmp;
   GError *error = NULL;
 
-  sock = nice_udp_bsd_socket_new (NULL, &error);
+  sock = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (sock != NULL);
 
@@ -103,11 +103,11 @@ test_simple_send_recv (void)
   gchar buf[5];
   GError *error = NULL;
 
-  server = nice_udp_bsd_socket_new (NULL, &error);
+  server = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (server != NULL);
 
-  client = nice_udp_bsd_socket_new (NULL, &error);
+  client = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (client != NULL);
 
@@ -141,7 +141,7 @@ test_zero_send_recv (void)
   NiceInputMessage local_in_message;
   GError *error = NULL;
 
-  sock = nice_udp_bsd_socket_new (NULL, &error);
+  sock = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (sock != NULL);
 
@@ -157,13 +157,14 @@ test_zero_send_recv (void)
   g_assert_cmpint (socket_recv (sock, &tmp, 0, NULL), ==, 0);
 
   /* And again with messages. */
+  memset(&local_out_message, 0, sizeof(local_out_message));
   g_assert_cmpint (nice_socket_send_messages (sock, &tmp,
       &local_out_message, 0), ==, 0);
   g_assert_cmpint (nice_socket_send_messages (sock, &tmp, NULL, 0), ==, 0);
 
   g_assert_cmpint (nice_socket_recv_messages (sock,
-      &local_in_message, 0), ==, 0);
-  g_assert_cmpint (nice_socket_recv_messages (sock, NULL, 0), ==, 0);
+      &local_in_message, 0, NULL), ==, 0);
+  g_assert_cmpint (nice_socket_recv_messages (sock, NULL, 0, NULL), ==, 0);
 
   nice_socket_free (sock);
 }
@@ -179,11 +180,11 @@ test_multi_buffer_recv (void)
   guint8 dummy_buf[9];
   GError *error = NULL;
 
-  server = nice_udp_bsd_socket_new (NULL, &error);
+  server = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (server != NULL);
 
-  client = nice_udp_bsd_socket_new (NULL, &error);
+  client = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (client != NULL);
 
@@ -209,7 +210,7 @@ test_multi_buffer_recv (void)
 
     /* Send and receive. */
     g_assert_cmpint (nice_socket_send (client, &tmp, 11, "hello-world"), ==, 11);
-    g_assert_cmpuint (nice_socket_recv_messages (server, &message, 1), ==, 1);
+    g_assert_cmpuint (nice_socket_recv_messages (server, &message, 1, NULL), ==, 1);
     g_assert_cmpuint (message.length, ==, 11);
 
     /* Check all of the things. The sizes should not have been modified. */
@@ -253,11 +254,11 @@ test_multi_message_recv (guint n_sends, guint n_receives,
   NiceAddress tmp;
   GError *error = NULL;
 
-  server = nice_udp_bsd_socket_new (NULL, &error);
+  server = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (server != NULL);
 
-  client = nice_udp_bsd_socket_new (NULL, &error);
+  client = nice_udp_bsd_socket_new (NULL, NULL, FALSE, &error);
   g_assert_no_error (error);
   g_assert_true (client != NULL);
 
@@ -323,7 +324,7 @@ test_multi_message_recv (guint n_sends, guint n_receives,
 
     /* Receive things. */
     g_assert_cmpint (
-        nice_socket_recv_messages (server, recv_messages, n_receives), ==,
+        nice_socket_recv_messages (server, recv_messages, n_receives, NULL), ==,
         expected_n_received_messages);
 
     /* Check all of the things. The sizes should not have been modified. */

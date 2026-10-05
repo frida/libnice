@@ -67,7 +67,6 @@ static GCond *stun_thread_signal_ptr = &stun_thread_signal;
 
 static NiceComponentState global_lagent_state = NICE_COMPONENT_STATE_LAST;
 static NiceComponentState global_ragent_state = NICE_COMPONENT_STATE_LAST;
-static GCancellable *global_cancellable;
 static gboolean exit_stun_thread = FALSE;
 static gboolean lagent_candidate_gathering_done = FALSE;
 static gboolean ragent_candidate_gathering_done = FALSE;
@@ -225,7 +224,7 @@ recv_packet:
   buf_len = stun_agent_finish_message (agent, &response, NULL, 0);
 
 send_buf:
-  g_cancellable_cancel (global_cancellable);
+  g_main_context_wakeup (NULL);
   g_debug ("Ready to send a STUN response");
   g_assert_true (g_mutex_trylock (stun_mutex_ptr));
   got_stun_packet = TRUE;
@@ -292,7 +291,6 @@ static void cb_candidate_gathering_done(NiceAgent *agent, guint stream_id, gpoin
     g_debug ("ragent finished gathering candidates");
     ragent_candidate_gathering_done = TRUE;
   }
-  g_cancellable_cancel (global_cancellable);
 }
 
 static void cb_nice_recv (NiceAgent *agent, guint stream_id, guint component_id, guint len, gchar *buf, gpointer user_data)
@@ -309,7 +307,7 @@ static void cb_nice_recv (NiceAgent *agent, guint stream_id, guint component_id,
     g_debug ("test-tricklemode:%s: ragent recieved %d bytes : quit mainloop",
              G_STRFUNC, len);
     data_received = TRUE;
-    g_cancellable_cancel (global_cancellable);
+    g_main_context_wakeup (NULL);
   }
 }
 
@@ -333,7 +331,7 @@ static void cb_component_state_changed (NiceAgent *agent, guint stream_id, guint
     send_stun = TRUE;
     g_cond_signal (stun_signal_ptr);
     g_mutex_unlock (stun_mutex_ptr);
-    g_cancellable_cancel (global_cancellable);
+    g_main_context_wakeup (NULL);
   }
 
   if(GPOINTER_TO_UINT(data) == 1 && state == NICE_COMPONENT_STATE_READY) {
@@ -408,6 +406,7 @@ static void add_bad_candidate (NiceAgent *agent, guint stream_id, NiceCandidate 
   cand->stream_id = stream_id;
   cand->component_id = NICE_COMPONENT_TYPE_RTP;
   cand->addr = bad_addr;
+  cand->priority = 10;
 
   nice_agent_get_local_credentials (agent, stream_id,
                                     &cand->username, &cand->password);
@@ -491,7 +490,6 @@ static void standard_test(NiceAgent *lagent, NiceAgent *ragent)
   nice_agent_gather_candidates (ragent, global_rs_id);
   while (!ragent_candidate_gathering_done)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (ragent_candidate_gathering_done);
   g_assert_true (nice_agent_peer_candidate_gathering_done (lagent, global_ls_id));
 
@@ -502,7 +500,6 @@ static void standard_test(NiceAgent *lagent, NiceAgent *ragent)
 
   while (!data_received)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (global_lagent_state >= NICE_COMPONENT_STATE_CONNECTED &&
             data_received);
 
@@ -512,14 +509,12 @@ static void standard_test(NiceAgent *lagent, NiceAgent *ragent)
 
   while (!lagent_candidate_gathering_done)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_true (lagent_candidate_gathering_done);
   g_assert_true (nice_agent_peer_candidate_gathering_done (ragent, global_rs_id));
 
   while (global_ragent_state < NICE_COMPONENT_STATE_CONNECTED)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_cmpint (global_lagent_state, ==, NICE_COMPONENT_STATE_READY);
   g_assert_cmpint (global_ragent_state, >=, NICE_COMPONENT_STATE_CONNECTED);
@@ -541,14 +536,12 @@ static void bad_credentials_test(NiceAgent *lagent, NiceAgent *ragent)
   nice_agent_gather_candidates (lagent, global_ls_id);
   while (!got_stun_packet)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (global_lagent_state == NICE_COMPONENT_STATE_GATHERING &&
             !lagent_candidate_gathering_done);
 
   nice_agent_gather_candidates (ragent, global_rs_id);
   while (!ragent_candidate_gathering_done)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (ragent_candidate_gathering_done);
   g_assert_true (nice_agent_peer_candidate_gathering_done (lagent, global_ls_id));
 
@@ -557,7 +550,6 @@ static void bad_credentials_test(NiceAgent *lagent, NiceAgent *ragent)
 
   while (global_lagent_state != NICE_COMPONENT_STATE_FAILED)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   // Set the correct credentials and swap candidates
   g_debug ("Setting local candidates of ragent as remote candidates of lagent");
@@ -570,7 +562,6 @@ static void bad_credentials_test(NiceAgent *lagent, NiceAgent *ragent)
 
   while (!data_received)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_true (data_received);
   g_assert_cmpint (global_lagent_state, ==, NICE_COMPONENT_STATE_READY);
@@ -579,7 +570,6 @@ static void bad_credentials_test(NiceAgent *lagent, NiceAgent *ragent)
   // Wait for lagent to finish gathering candidates
   while (!lagent_candidate_gathering_done)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_true (lagent_candidate_gathering_done);
   g_assert_true (nice_agent_peer_candidate_gathering_done (ragent, global_rs_id));
@@ -598,14 +588,12 @@ static void bad_candidate_test(NiceAgent *lagent,NiceAgent *ragent)
   nice_agent_gather_candidates (lagent, global_ls_id);
   while (!got_stun_packet)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (global_lagent_state == NICE_COMPONENT_STATE_GATHERING &&
             !lagent_candidate_gathering_done);
 
   nice_agent_gather_candidates (ragent, global_rs_id);
   while (!ragent_candidate_gathering_done)
       g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_true (ragent_candidate_gathering_done);
   g_assert_true (nice_agent_peer_candidate_gathering_done (lagent, global_ls_id));
@@ -615,14 +603,12 @@ static void bad_candidate_test(NiceAgent *lagent,NiceAgent *ragent)
   // lagent will finish candidate gathering causing this mainloop to quit
   while (!lagent_candidate_gathering_done)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_true (nice_agent_peer_candidate_gathering_done (ragent, global_rs_id));
 
   // connchecks will fail causing this mainloop to quit
   while (global_lagent_state != NICE_COMPONENT_STATE_FAILED)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_true (global_lagent_state == NICE_COMPONENT_STATE_FAILED &&
             !data_received);
@@ -637,7 +623,6 @@ static void bad_candidate_test(NiceAgent *lagent,NiceAgent *ragent)
 
   while (!data_received)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
 
   g_assert_true (lagent_candidate_gathering_done);
 
@@ -658,20 +643,17 @@ static void new_candidate_test(NiceAgent *lagent, NiceAgent *ragent)
   nice_agent_gather_candidates (lagent, global_ls_id);
   while (!got_stun_packet)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (global_lagent_state == NICE_COMPONENT_STATE_GATHERING &&
             !lagent_candidate_gathering_done);
 
   nice_agent_gather_candidates (ragent, global_rs_id);
   while (!ragent_candidate_gathering_done)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (nice_agent_peer_candidate_gathering_done (lagent, global_ls_id));
 
   // Wait for data
   while (!data_received)
       g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (data_received);
 
   // Data arrived, signal STUN thread to send STUN response
@@ -683,7 +665,6 @@ static void new_candidate_test(NiceAgent *lagent, NiceAgent *ragent)
   // Wait for lagent to finish gathering candidates
   while (!lagent_candidate_gathering_done)
     g_main_context_iteration (NULL, TRUE);
-  g_cancellable_reset (global_cancellable);
   g_assert_true (nice_agent_peer_candidate_gathering_done (ragent, global_rs_id));
 
   g_assert_true (lagent_candidate_gathering_done);
@@ -718,13 +699,7 @@ int main(void)
   NiceAgent *lagent = NULL, *ragent = NULL;
   GThread *stun_thread = NULL;
   NiceAddress baseaddr;
-  GSource *src;
   int sock;
-
-  global_cancellable = g_cancellable_new ();
-  src = g_cancellable_source_new (global_cancellable);
-  g_source_set_dummy_callback (src);
-  g_source_attach (src, NULL);
 
   sock = listen_socket (&stun_port);
 
@@ -794,10 +769,6 @@ int main(void)
   g_object_unref (ragent);
 
   g_thread_join (stun_thread);
-  g_object_unref (global_cancellable);
-
-  g_source_destroy (src);
-  g_source_unref (src);
 
   WAIT_UNTIL_UNSET (lagent, NULL);
   WAIT_UNTIL_UNSET (ragent, NULL);

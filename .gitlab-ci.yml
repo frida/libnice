@@ -1,5 +1,4 @@
 stages:
- - verify
  - containers
  - build
  - test
@@ -18,44 +17,44 @@ workflow:
 
 include:
   - project: 'freedesktop/ci-templates'
-    file: '/templates/ci-fairy.yml'
-  - project: 'freedesktop/ci-templates'
     file: '/templates/centos.yml'
+    ref: '48c2c583a865bd59be21e8938df247faf460099c'
+  - project: 'freedesktop/ci-templates'
+    file: '/templates/fedora.yml'
+    ref: '48c2c583a865bd59be21e8938df247faf460099c'
 
-.libnice.centos:7:
+.libnice.centos:8:
   variables:
-    FDO_DISTRIBUTION_VERSION: '7'
-    FDO_DISTRIBUTION_TAG: '2022-10-17-cov'
+    FDO_DISTRIBUTION_VERSION: '8'
+    FDO_DISTRIBUTION_TAG: '2025-05-26-3'
     FDO_UPSTREAM_REPO: 'libnice/libnice'
 
-check-allow-collaboration:
-  extends:
-    - .fdo.ci-fairy
-  script:
-   - ci-fairy check-merge-request --require-allow-collaboration
-  interruptible: true
-  needs: []
-  stage: 'verify'
+.libnice.fedora:42:
   variables:
-    GIT_STRATEGY: 'none'
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-      when: always
+    FDO_DISTRIBUTION_VERSION: '42'
+    FDO_DISTRIBUTION_TAG: '2025-08-11'
+    FDO_UPSTREAM_REPO: 'libnice/libnice'
 
-build-centos-container:7:
+build-centos-container:8:
   extends:
   - .fdo.container-build@centos     # the CI template
-  - .libnice.centos:7               # our template job above
+  - .libnice.centos:8               # our template job above
   stage: containers
   variables:
-    FDO_DISTRIBUTION_PACKAGES: 'git gtk-doc gnutls-devel gupnp-igd-devel gstreamer1-devel gobject-introspection-devel valgrind net-tools centos-release-scl graphviz'
-    FDO_DISTRIBUTION_EXEC: 'tests/docker/centos7-meson/pip-installs.sh'
+    FDO_DISTRIBUTION_PACKAGES: 'git gnutls-devel gstreamer1-devel gstreamer1-plugins-base gobject-introspection-devel valgrind net-tools graphviz python3-pip'
+    FDO_DISTRIBUTION_EXEC: 'tests/docker/centos8/pip-installs.sh'
 
-build:
-  stage: build
+build-fedora-container:42:
   extends:
-  - .fdo.distribution-image@centos
-  - .libnice.centos:7
+  - .fdo.container-build@fedora     # the CI template
+  - .libnice.fedora:42              # our template job above
+  stage: containers
+  variables:
+    FDO_DISTRIBUTION_PACKAGES: 'git gtk-doc gnutls-devel gupnp-igd-devel gstreamer1-devel gstreamer1-plugins-base gobject-introspection-devel valgrind net-tools graphviz meson ninja-build lcov python3-pip coturn file'
+    FDO_DISTRIBUTION_EXEC: 'tests/docker/fedora42/pip-installs.sh'
+
+.build:
+  stage: build
   interruptible: true
   variables:
     PREFIX: "${CI_PROJECT_DIR}/libnice-prefix"
@@ -64,23 +63,32 @@ build:
   before_script:
     - mkdir -p "${CI_PROJECT_DIR}"
   script:
-    ## && true to make gitlab-ci happy
-    - source scl_source enable rh-python36 && true
     - meson --werror --warnlevel 2 -Dgtk_doc=enabled --prefix=$PREFIX -Db_coverage=true build/
     - ninja -C build/
   artifacts:
     paths:
       - build/
 
+build centos:8:
+  extends:
+  - .fdo.distribution-image@centos
+  - .libnice.centos:8
+  - .build
+
+build fedora:42:
+  extends:
+  - .fdo.distribution-image@fedora
+  - .libnice.fedora:42
+  - .build
 
 .build windows:
-  image: 'registry.freedesktop.org/gstreamer/gstreamer/amd64/windows:2021-10-01.0-master'
+  image: 'registry.freedesktop.org/gstreamer/gstreamer/amd64/windows:2023-08-24.0-main'
   stage: 'build'
   interruptible: true
   tags:
     - 'docker'
     - 'windows'
-    - '1809'
+    - '2022'
   variables:
     MESON_ARGS: >
       --prefix=${CI_PROJECT_DIR}/libnice-prefix
@@ -101,8 +109,6 @@ build msys2:
 
     # It seems that the gpg doesn't like the SSL secured version of the keyserver
     - C:\msys64\usr\bin\bash -c "pacman-key --init && pacman-key --populate msys2 && pacman-key --refresh-keys || true"
-    - echo "Download newest msys2 keyring"
-    - C:\msys64\usr\bin\bash -c "curl -O http://repo.msys2.org/msys/x86_64/msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz && pacman -U --noconfirm msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz"
     - C:\msys64\usr\bin\bash -c "pacman-key --init && pacman-key --populate msys2"
     - C:\msys64\usr\bin\bash -c "pacman-key --refresh-keys || true"
     - C:\msys64\usr\bin\bash -c "pacman -Sy --noconfirm --needed mingw-w64-x86_64-toolchain ninja"
@@ -224,21 +230,18 @@ build msvc x86 openssl:
   variables:
     ARCH: 'x86'
 
-test:
+.test:
   stage: test
   extends:
-  - .fdo.distribution-image@centos
-  - .libnice.centos:7
   interruptible: true
-  needs:
-    - build
   except:
     - schedules
-  script:
+  before_script:
     - ifconfig
-    - source scl_source enable rh-python36 && true
+  script:
     - ninja -C build/
     - meson test -C build/ --setup debug
+  after_script:
     - ninja -C build coverage
     - lcov_cobertura build/meson-logs/coverage.info -o build/meson-logs/coverage.xml
   coverage: '/lines......: \d+\.\d+% /'
@@ -252,29 +255,49 @@ test:
     paths:
       - build/meson-logs/
 
-test valgrind:
-  extends: test
+test centos:8:
+  extends:
+  - .fdo.distribution-image@centos
+  - .libnice.centos:8
+  - .test
+  needs:
+    - build centos:8
+
+test fedora:42:
+  extends:
+  - .fdo.distribution-image@fedora
+  - .libnice.fedora:42
+  - .test
+  needs:
+  - build fedora:42
+
+test valgrind centos:8:
+  extends: test centos:8
   script:
-    - ifconfig
-    - source scl_source enable rh-python36 && true
     - meson configure build -Dgtk_doc=disabled
     - ninja -C build/
     - meson test -C build/ --setup valgrind --print-errorlogs
 
-doc-and-install:
+test valgrind fedora:42:
+  extends: test fedora:42
+  script:
+    - meson configure build -Dgtk_doc=disabled
+    - ninja -C build/
+    - meson test -C build/ --setup valgrind --print-errorlogs
+
+doc-and-install centos:8:
   stage: test
   extends:
   - .fdo.distribution-image@centos
-  - .libnice.centos:7
+  - .libnice.centos:8
   interruptible: true
   needs:
-    - build
+    - build centos:8
   except:
     - schedules
   variables:
     PREFIX: "${CI_PROJECT_DIR}/libnice-prefix"
   script:
-    - source scl_source enable rh-python36 && true
     - ninja -C build/ libnice-doc
     - ninja -C build/ install
     - ls -lR ${PREFIX}
@@ -285,8 +308,8 @@ doc-and-install:
 submit-to-coverity:
  stage: test
  extends:
-  - .fdo.distribution-image@centos
-  - .libnice.centos:7
+  - .fdo.distribution-image@fedora
+  - .libnice.fedora:42
  variables:
    COVERITY_PROJECT: libnice
    PREFIX: "${CI_PROJECT_DIR}/libnice-prefix"
@@ -299,8 +322,7 @@ submit-to-coverity:
  script:
   - curl -v https://scan.coverity.com/download/linux64  -o coverity_tool.tgz  --data "token=${COVERITY_TOKEN}&project=${COVERITY_PROJECT}" && tar xf coverity_tool.tgz && rm coverity_tool.tgz
   - mv cov-analysis-linux64-* cov-analysis-linux64
-  - source scl_source enable rh-python36 && true
-  - meson --werror --warnlevel 2 -Dgtk_doc=disabled -Dinstrospection=disabled --prefix=$PREFIX cov-build/
+  - meson --werror --warnlevel 2 -Dgtk_doc=disabled -Dintrospection=disabled --prefix=$PREFIX cov-build/
   - export PATH="$PATH:${CI_PROJECT_DIR}/cov-analysis-linux64/bin"
   - echo $PATH
   - cov-build --dir cov-int ninja -C cov-build
@@ -310,7 +332,7 @@ submit-to-coverity:
 pages:
   stage: deploy
   dependencies:
-    - doc-and-install
+    - doc-and-install centos:8
   only:
     - latest-release
   artifacts:

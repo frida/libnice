@@ -75,6 +75,11 @@ typedef struct {
   gsize offset;
 } NiceInputMessageIter;
 
+struct _NiceMessageExtraData
+{
+  GSocketControlMessage *tos;
+};
+
 void
 nice_input_message_iter_reset (NiceInputMessageIter *iter);
 gboolean
@@ -107,7 +112,7 @@ nice_input_message_iter_compare (const NiceInputMessageIter *a,
 #define NICE_AGENT_TIMER_TA_DEFAULT 20      /* timer Ta, msecs (impl. defined) */
 #define NICE_AGENT_TIMER_TR_DEFAULT 25000   /* timer Tr, msecs (impl. defined) */
 #define NICE_AGENT_TIMER_CONSENT_DEFAULT 5000    /* msec timer consent freshness connchecks (RFC 7675) */
-#define NICE_AGENT_TIMER_CONSENT_TIMEOUT 10000   /* msec timer for consent checks to timeout and assume consent lost (RFC 7675) */
+#define NICE_AGENT_TIMER_CONSENT_TIMEOUT 30000   /* msec timer for consent checks to timeout and assume consent lost (RFC 7675) */
 #define NICE_AGENT_TIMER_MIN_CONSENT_INTERVAL 4000  /* msec timer minimum for consent lost requests (RFC 7675) */
 #define NICE_AGENT_TIMER_KEEPALIVE_TIMEOUT 50000    /* msec timer for keepalive (without consent checks) to timeout and assume conection lost */
 #define NICE_AGENT_MAX_CONNECTIVITY_CHECKS_DEFAULT 100 /* see RFC 8445 6.1.2.5 */
@@ -182,6 +187,10 @@ struct _NiceAgent
   gboolean bytestream_tcp;         /* property: bytestream-tcp */
   gboolean keepalive_conncheck;    /* property: keepalive_conncheck */
 
+  GCancellable *stun_resolving_cancellable; /* Cancel STUN name resolution */
+  GSList *stun_resolving_list;     /* List of ongoing resolutions */
+  guint turn_resolving_count;      /* Number of outstanding turn server resolve tasks */
+
   GQueue pending_signals;
   gboolean use_ice_udp;
   gboolean use_ice_tcp;
@@ -192,6 +201,9 @@ struct _NiceAgent
                                          conncheck */
   gboolean consent_freshness;         /* rfc 7675 consent freshness with
                                          connchecks */
+  gboolean close_forced;              /* property: close-forced */
+  GTask* close_task;                  /* task associated with ongoing nice_agent_close_async() */
+  gboolean recv_tos;                  /* property: recv-tos */
   /* XXX: add pointer to internal data struct for ABI-safe extensions */
 };
 
@@ -297,11 +309,11 @@ nice_candidate_ice_priority_full (guint type_pref, guint local_pref,
 
 guint32
 nice_candidate_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted, GSList *local_addresses);
+    gboolean reliable, gboolean nat_assisted);
 
 guint32
 nice_candidate_ms_ice_priority (const NiceCandidate *candidate,
-    gboolean reliable, gboolean nat_assisted, GSList *local_addresses);
+    gboolean reliable, gboolean nat_assisted);
 
 guint64
 nice_candidate_pair_priority (guint32 o_prio, guint32 a_prio);
@@ -310,6 +322,10 @@ nice_candidate_pair_priority (guint32 o_prio, guint32 a_prio);
 
 void
 nice_candidate_pair_priority_to_string (guint64 prio, gchar *string);
+
+void
+nice_message_extra_data_copy (NiceMessageExtraData *dest,
+    NiceMessageExtraData *src);
 
 /*
  * nice_debug_init:

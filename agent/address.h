@@ -271,15 +271,17 @@ void
 nice_address_to_string (const NiceAddress *addr, gchar *dst);
 
 /**
- * nice_address_to_string_dup:
+ * nice_address_dup_string:
  * @addr: The #NiceAddress to query
  *
  * Transforms the address @addr into a newly allocated human readable string
  *
  * Returns: (transfer full): the address string
+ *
+ * Since: 0.1.20
  */
-char *
-nice_address_to_string_dup (const NiceAddress *addr);
+gchar *
+nice_address_dup_string (const NiceAddress *addr);
 
 /**
  * nice_address_is_private:

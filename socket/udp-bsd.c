@@ -24,6 +24,7 @@
  * Contributors:
  *   Dafydd Harries, Collabora Ltd.
  *   Youness Alaoui, Collabora Ltd.
+ *   Martin Nordholts, Axis Communications AB, 2025.
  *
  * Alternatively, the contents of this file may be used under the terms of the
  * the GNU Lesser General Public License Version 2.1 (the "LGPL"), in which
@@ -60,7 +61,8 @@
 
 static void socket_close (NiceSocket *sock);
 static gint socket_recv_messages (NiceSocket *sock,
-    NiceInputMessage *recv_messages, guint n_recv_messages);
+    NiceInputMessage *recv_messages, guint n_recv_messages,
+    NiceMessageExtraData *exdata);
 static gint socket_send_messages (NiceSocket *sock, const NiceAddress *to,
     const NiceOutputMessage *messages, guint n_messages);
 static gint socket_send_messages_reliable (NiceSocket *sock,
@@ -72,15 +74,26 @@ static void socket_set_writable_callback (NiceSocket *sock,
 
 struct UdpBsdSocketPrivate
 {
+  /* read-only */
+  GMainContext *context;
+
+  /* We follow the pattern set by `TcpPriv` and don't protect this data with a
+   * mutex.
+   */
+  NiceSocketWritableCb writable_cb;
+  gpointer writable_data;
+
   GMutex mutex;
 
   /* protected by mutex */
   NiceAddress niceaddr;
   GSocketAddress *gaddr;
+  GSource *io_source;
 };
 
 NiceSocket *
-nice_udp_bsd_socket_new (NiceAddress *addr, GError **error)
+nice_udp_bsd_socket_new (GMainContext *ctx, NiceAddress *addr, gboolean recv_tos,
+    GError **error)
 {
   union {
     struct sockaddr_storage storage;
@@ -146,6 +159,42 @@ nice_udp_bsd_socket_new (NiceAddress *addr, GError **error)
   }
 #endif
 
+  if (recv_tos) {
+#if GLIB_CHECK_VERSION (2, 88, 0)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    gint level;
+    gint optname = 0;
+    GError *gerr = NULL;
+
+    if (nice_address_ip_version (addr) == 6) {
+      level = IPPROTO_IPV6;
+#ifdef IPV6_RECVTCLASS
+      optname = IPV6_RECVTCLASS;
+
+      /* Make sure NiceIPv6TClassMessage is registered with GType. */
+      G_TYPE_IPV6_TCLASS_MESSAGE;
+#endif
+    } else {
+      level = IPPROTO_IP;
+#ifdef IP_RECVTOS
+      optname = IP_RECVTOS;
+
+      /* Make sure NiceIPTosMessage is registered with GType. */
+      G_TYPE_IP_TOS_MESSAGE;
+#endif
+    }
+
+    if (optname &&
+        !g_socket_set_option (gsock, level, optname, 1, &gerr)) {
+      nice_debug ("Couldn't enable receiving of ToS: %s", gerr->message);
+      g_clear_error (error);
+    }
+#pragma GCC diagnostic pop
+#else
+    g_assert_not_reached();
+#endif
+  }
 
   /* GSocket: All socket file descriptors are set to be close-on-exec. */
   g_socket_set_blocking (gsock, false);
@@ -176,6 +225,10 @@ nice_udp_bsd_socket_new (NiceAddress *addr, GError **error)
   nice_address_set_from_sockaddr (&sock->addr, &name.addr);
 
   priv = sock->priv = g_slice_new0 (struct UdpBsdSocketPrivate);
+  if (ctx == NULL) {
+    ctx = g_main_context_default ();
+  }
+  priv->context = g_main_context_ref (ctx);
   nice_address_init (&priv->niceaddr);
 
   sock->type = NICE_SOCKET_TYPE_UDP_BSD;
@@ -200,6 +253,15 @@ socket_close (NiceSocket *sock)
 
   g_clear_object (&priv->gaddr);
   g_mutex_clear (&priv->mutex);
+  if (priv->io_source) {
+    g_source_destroy (priv->io_source);
+    g_source_unref (priv->io_source);
+    priv->io_source = NULL;
+  }
+  if (priv->context) {
+    g_main_context_unref (priv->context);
+    priv->context = NULL;
+  }
   g_slice_free (struct UdpBsdSocketPrivate, sock->priv);
   sock->priv = NULL;
 
@@ -212,7 +274,8 @@ socket_close (NiceSocket *sock)
 
 static gint
 socket_recv_messages (NiceSocket *sock,
-    NiceInputMessage *recv_messages, guint n_recv_messages)
+    NiceInputMessage *recv_messages, guint n_recv_messages,
+    NiceMessageExtraData *exdata)
 {
   guint i;
   gboolean error = FALSE;
@@ -225,13 +288,21 @@ socket_recv_messages (NiceSocket *sock,
   for (i = 0; i < n_recv_messages; i++) {
     NiceInputMessage *recv_message = &recv_messages[i];
     GSocketAddress *gaddr = NULL;
+    GSocketControlMessage **ctlmsgs = NULL;
+    gint num_ctlmsgs = 0;
     GError *gerr = NULL;
     gssize recvd;
     gint flags = G_SOCKET_MSG_NONE;
 
+#if (!defined(IP_RECVTOS) && !defined(IPV6_RECVTCLASS)) || !GLIB_CHECK_VERSION (2, 88, 0)
+    exdata = NULL;
+#endif
+
     recvd = g_socket_receive_message (sock->fileno,
         (recv_message->from != NULL) ? &gaddr : NULL,
-        recv_message->buffers, recv_message->n_buffers, NULL, NULL,
+        recv_message->buffers, recv_message->n_buffers,
+        exdata ? &ctlmsgs : NULL,
+        exdata ? &num_ctlmsgs : NULL,
         &flags, NULL, &gerr);
 
     if (recvd < 0) {
@@ -260,6 +331,21 @@ socket_recv_messages (NiceSocket *sock,
       nice_address_set_from_sockaddr (recv_message->from, &sa.addr);
     }
 
+#if GLIB_CHECK_VERSION (2, 88, 0)
+    {
+      gint j;
+
+      for (j = 0; j != num_ctlmsgs; ++j) {
+        GSocketControlMessage *msg = ctlmsgs[j];
+        if (exdata &&
+            (G_IS_IP_TOS_MESSAGE (msg) || G_IS_IPV6_TCLASS_MESSAGE (msg))) {
+          exdata->tos = g_object_ref (msg);
+        }
+        g_object_unref (msg);
+      }
+    }
+#endif
+
     if (gaddr != NULL)
       g_object_unref (gaddr);
 
@@ -273,6 +359,42 @@ socket_recv_messages (NiceSocket *sock,
     return -1;
 
   return i;
+}
+
+static gboolean
+_udp_bsd_io_callback (GSocket *gsocket, GIOCondition condition, gpointer data)
+{
+  NiceSocket *sock = (NiceSocket *) data;
+  struct UdpBsdSocketPrivate *priv = sock->priv;
+
+  if (!(condition & G_IO_OUT)) {
+    /* The source must be kept alive as the socket is not writable. */
+    return G_SOURCE_CONTINUE;
+  }
+
+  /* From tcp-bsd.c. Unsure if needed, but kept just in case. */
+  if (g_source_is_destroyed (g_main_current_source ())) {
+    nice_debug ("Source was destroyed. Avoided race condition in udp-bsd.c:_udp_bsd_io_callback");
+    g_mutex_unlock (&priv->mutex);
+    return G_SOURCE_REMOVE;
+  }
+
+  /* The socket is now writable. Assume this was the last time we had to wait
+   * for the socket to become writable. If this was _not_ the last time, we will
+   * simply set up this source later again when we get the next
+   * G_IO_ERROR_WOULD_BLOCK.
+   */
+  g_mutex_lock (&priv->mutex);
+  g_source_destroy (priv->io_source);
+  g_source_unref (priv->io_source);
+  priv->io_source = NULL;
+  g_mutex_unlock (&priv->mutex);
+
+  if (priv->writable_cb) {
+    priv->writable_cb (sock, priv->writable_data);
+  }
+
+  return G_SOURCE_REMOVE;
 }
 
 static gint
@@ -342,6 +464,22 @@ socket_send_messages (NiceSocket *sock, const NiceAddress *to,
   if (len < 0) {
     if (g_error_matches (child_error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK)) {
       len = 0;
+
+      g_mutex_lock (&priv->mutex);
+      if (!priv->io_source && sock->fileno && priv->context) {
+        priv->io_source = g_socket_create_source (sock->fileno, G_IO_OUT, NULL);
+        /* `sock` is valid throughout the lifetime of the `GSource` because
+         * before `sock` is destroyed we remove the GSource in its
+         * `socket_close()`.
+         */
+        g_source_set_callback (
+            priv->io_source,
+            (GSourceFunc) G_CALLBACK (_udp_bsd_io_callback),
+            sock,
+            NULL);
+        g_source_attach (priv->io_source, priv->context);
+      }
+      g_mutex_unlock (&priv->mutex);
     } else if (nice_debug_is_verbose()) {
       union {
         struct sockaddr_storage ss;
@@ -401,5 +539,9 @@ static void
 socket_set_writable_callback (NiceSocket *sock,
     NiceSocketWritableCb callback, gpointer user_data)
 {
+  struct UdpBsdSocketPrivate *priv = sock->priv;
+
+  priv->writable_cb = callback;
+  priv->writable_data = user_data;
 }
 
